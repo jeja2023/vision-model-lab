@@ -1,0 +1,12 @@
+decision:
+  model: cross_camera_tracking/person_detector_yolov8n_v1.0.0_fp32.onnx
+  recommendation: gray_release
+  reason:
+    - "固定测试集 mAP50 高于线上版本。"
+    - "低照度样本召回略低，建议先灰度。"
+  required_service_checks:
+    - smoke_test
+    - model_package_check
+    - latency_check
+  rollback_target: cross_camera_tracking/person_detector_yolov8n_v0.9.0_fp32.onnx
+

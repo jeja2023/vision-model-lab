@@ -1,0 +1,15 @@
+review_report:
+  dataset: person_detection_dataset_v1.0.0
+  task: detection
+  reviewer: ""
+  reviewed_at: ""
+  sample_count: 0
+  pass_rate: 0.0
+  missing_label_rate: 0.0
+  duplicate_label_rate: 0.0
+  uncertain_ratio: 0.0
+  high_risk_classes:
+    - person
+  conclusion: pending
+  notes: []
+

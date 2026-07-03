@@ -1,0 +1,44 @@
+model:
+  name: person_detector_yolov8n
+  version: 1.0.0
+  task: detection
+  architecture: yolov8n
+  precision: fp32
+  format: onnx
+  sha256: ""
+
+dataset:
+  train: person_detection_dataset_v1.0.0
+  val: person_detection_dataset_v1.0.0
+  test: person_detection_test_v1.0.0
+
+input:
+  layout: nchw
+  shape: [1, 3, 640, 640]
+  dtype: float32
+  color: rgb
+  resize: letterbox
+  normalize: none
+
+output:
+  format: yolo
+  classes: person
+  recommended_confidence: 0.25
+  recommended_iou: 0.45
+
+metrics:
+  map50: 0.0
+  precision: 0.0
+  recall: 0.0
+  latency_ms:
+    gpu: 0.0
+
+deployment:
+  runtime: onnxruntime
+  min_gpu_memory_mb: 0
+  max_batch_size: 16
+  supports_dynamic_batch: true
+
+limitations:
+  - "低照度和严重遮挡场景需要继续补充数据。"
+

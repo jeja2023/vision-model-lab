@@ -1,0 +1,13 @@
+tolerance: 0.001
+cases:
+  - name: detector_frame_001
+    method: POST
+    path: /vision/infer
+    form:
+      model_id: person_detector_candidate
+      confidence: "0.25"
+      iou: "0.45"
+    files:
+      files: person_detector_yolov8n_v1.0.0_fp32.examples/frame_001.jpg
+    expected_path: person_detector_yolov8n_v1.0.0_fp32.examples/frame_001.expected.json
+

@@ -1,0 +1,38 @@
+experiment:
+  id: defect_segmenter_20260609_001
+  task: segmentation
+  project: quality_inspection
+  status: planned
+  seed: 42
+
+dataset:
+  name: defect_segmentation_dataset
+  version: 1.0.0
+
+model:
+  architecture: unet
+  version: 1.0.0
+  input_size: [640, 640]
+
+labels:
+  - background
+  - defect
+
+training:
+  adapter: segmentation_baseline
+  epochs: 50
+  batch_size: 8
+
+evaluation:
+  adapter: segmentation_baseline
+  primary_metric: miou
+  expected_metrics:
+    miou: 0.01
+    dice: 0.01
+
+export:
+  adapter: segmentation_baseline
+  artifact_name: defect_segmenter_unet_v1.0.0_fp32.onnx
+  format: onnx
+  precision: fp32
+

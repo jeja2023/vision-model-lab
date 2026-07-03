@@ -1,0 +1,37 @@
+experiment:
+  id: person_reid_20260609_001
+  task: reid
+  project: cross_camera_tracking
+  status: planned
+  seed: 42
+
+dataset:
+  name: person_reid_dataset
+  version: 1.0.0
+
+model:
+  architecture: osnet_ibn_x1_0
+  version: 1.0.0
+  input_size: [256, 128]
+
+labels:
+  - identity
+
+training:
+  adapter: reid_baseline
+  epochs: 60
+  batch_size: 32
+
+evaluation:
+  adapter: reid_baseline
+  primary_metric: rank1
+  expected_metrics:
+    map: 0.01
+    rank1: 0.01
+
+export:
+  adapter: reid_baseline
+  artifact_name: person_reid_osnet_ibn_x1_0_v1.0.0_fp32.onnx
+  format: onnx
+  precision: fp32
+

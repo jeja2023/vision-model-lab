@@ -1,0 +1,24 @@
+experiment:
+  id: reference_identity_001
+  task: reference
+  status: planned
+  seed: 42
+
+dataset:
+  name: synthetic_identity_dataset
+  version: 0.1.0
+
+model:
+  architecture: identity
+
+training:
+  adapter: reference_identity
+
+evaluation:
+  adapter: reference_identity
+  primary_metric: identity_loadable
+
+export:
+  adapter: reference_identity
+  artifact_name: reference_identity_v0.1.0_fp32.onnx
+

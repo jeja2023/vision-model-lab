@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Iterator
+
+import pytest
+from fastapi.testclient import TestClient
+
+import vision_model_lab.api as api
+from vision_model_lab.storage import MetadataStore
+
+
+@pytest.fixture(autouse=True)
+def isolated_api_store() -> Iterator[None]:
+    previous_store = api.STORE
+    api.STORE = MetadataStore(":memory:")
+    try:
+        yield
+    finally:
+        api.STORE = previous_store
+
+
+def _client() -> TestClient:
+    return TestClient(api.app)
+
+
+def test_health_endpoint() -> None:
+    client = _client()
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert "workspace" in body
+    assert "metadata_db" in body
+
+
+def test_manifest_validation_endpoint() -> None:
+    client = _client()
+
+    response = client.post("/api/manifests/validate", json={"path": "data/manifests/example_train_v1.jsonl"})
+
+    assert response.status_code == 200
+    assert response.json()["manifest"]["ok"] is True
+
+
+def test_experiment_endpoint_round_trip() -> None:
+    client = _client()
+    payload = {
+        "id": "api_test_experiment",
+        "task": "detection",
+        "dataset": "dataset_v1.0.0",
+        "model": "yolov8n",
+        "status": "planned",
+        "metrics": {"map50": 0.5},
+    }
+
+    post_response = client.post("/api/experiments", json=payload)
+    get_response = client.get("/api/experiments")
+
+    assert post_response.status_code == 200
+    assert get_response.status_code == 200
+    assert any(item["id"] == "api_test_experiment" for item in get_response.json()["experiments"])
+
+
+def test_path_escape_is_rejected() -> None:
+    client = _client()
+
+    response = client.post("/api/manifests/validate", json={"path": "../outside.jsonl"})
+
+    assert response.status_code == 400
+
+
+def test_templates_endpoint() -> None:
+    client = _client()
+
+    response = client.get("/api/templates")
+
+    assert response.status_code == 200
+    assert "model_card" in response.json()
+
+
+def test_contract_validation_endpoint() -> None:
+    client = _client()
+
+    response = client.post(
+        "/api/contracts/validate",
+        json={"kind": "models-fragment", "path": "configs/export/models.fragment.template.yml"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["contract"]["ok"] is True
+
+
+def test_adapters_endpoint() -> None:
+    client = _client()
+
+    response = client.get("/api/adapters")
+
+    assert response.status_code == 200
+    names = {item["name"] for item in response.json()["adapters"]}
+    assert "detection_yolo_baseline" in names
+
+
+def test_pipeline_package_audit_and_error_analysis_endpoints() -> None:
+    client = _client()
+
+    run_response = client.post(
+        "/api/pipelines/run",
+        json={"config_path": "configs/experiments/detection_yolo_baseline.yml", "package": True},
+    )
+    runs_response = client.get("/api/pipelines/runs")
+    package_response = client.post(
+        "/api/packages/create",
+        json={"config_path": "configs/experiments/detection_yolo_baseline.yml"},
+    )
+    error_response = client.post("/api/error-analysis", json={"path": "data/manifests/example_train_v1.jsonl"})
+    audit_response = client.get("/api/audit-events")
+
+    assert run_response.status_code == 200
+    assert run_response.json()["run"]["report"]["status"] == "completed"
+    assert runs_response.status_code == 200
+    assert package_response.status_code == 200
+    assert package_response.json()["package"]["validation"]["ok"] is True
+    assert error_response.status_code == 200
+    assert error_response.json()["analysis"]["total"] == 2
+    assert audit_response.status_code == 200
+    assert audit_response.json()["events"]
+
+
+def test_frontend_fallback_does_not_serve_workspace_files() -> None:
+    client = _client()
+
+    response = client.get("/%2e%2e/%2e%2e/pyproject.toml")
+
+    assert response.status_code in {200, 404}
+    assert "[build-system]" not in response.text
+
+
+def test_package_validate_rejects_absolute_model_id_outside_package() -> None:
+    client = _client()
+    outside_model = Path(
+        "experiments/local_runs/person_detector_20260603_001/export/person_detector_yolov8n_v1.0.0_fp32.onnx"
+    ).resolve()
+
+    response = client.post(
+        "/api/packages/validate",
+        json={
+            "package_dir": "shared-models",
+            "model_id": str(outside_model),
+            "strict_examples": False,
+            "persist": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["validation"]["issues"][0]["code"] == "package.model_outside_package"
+
+
+def test_async_pipeline_job_completes() -> None:
+    client = _client()
+
+    response = client.post(
+        "/api/pipelines/run",
+        json={"config_path": "configs/experiments/detection_yolo_baseline.yml", "package": False, "async": True},
+    )
+
+    assert response.status_code == 200
+    job_id = response.json()["job"]["id"]
+    job = response.json()["job"]
+    for _ in range(40):
+        job_response = client.get(f"/api/pipelines/jobs/{job_id}")
+        assert job_response.status_code == 200
+        job = job_response.json()["job"]
+        if job["status"] in {"completed", "failed", "cancelled"}:
+            break
+        time.sleep(0.1)
+
+    assert job["status"] == "completed"
+    assert job["result"]["status"] == "completed"
+
+def test_mlops_registry_release_and_rollout_endpoints() -> None:
+    client = _client()
+
+    dataset_response = client.post(
+        "/api/datasets/versions",
+        json={
+            "name": "person_detection_dataset",
+            "version": "1.0.0",
+            "task": "detection",
+            "manifest_path": "data/manifests/example_train_v1.jsonl",
+            "labels": ["person"],
+            "min_split_counts": {"train": 1, "val": 1},
+        },
+    )
+    model_response = client.post(
+        "/api/models/registry",
+        json={
+            "package_dir": "shared-models/cross_camera_tracking",
+            "model_id": "person_detector_yolov8n_v1.0.0_fp32.onnx",
+            "stage": "candidate",
+            "metrics": {"map50": 0.5},
+        },
+    )
+    approval_response = client.post(
+        "/api/releases/approvals",
+        json={"path": "configs/export/release-decision.template.yml", "status": "approved"},
+    )
+    rollout_response = client.post(
+        "/api/deployments/rollouts",
+        json={
+            "model_id": "cross_camera_tracking/person_detector_yolov8n_v1.0.0_fp32.onnx",
+            "environment": "production",
+            "strategy": "gray",
+            "status": "planned",
+            "traffic_percent": 10,
+            "rollback_target": "cross_camera_tracking/person_detector_yolov8n_v0.9.0_fp32.onnx",
+        },
+    )
+
+    assert dataset_response.status_code == 200
+    assert model_response.status_code == 200
+    assert approval_response.status_code == 200
+    assert rollout_response.status_code == 200
+    assert client.get("/api/datasets/versions").json()["datasets"]
+    assert client.get("/api/models/registry").json()["models"]
+    assert client.get("/api/releases/approvals").json()["approvals"]
+    assert client.get("/api/deployments/rollouts").json()["rollouts"]

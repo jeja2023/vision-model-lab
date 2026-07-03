@@ -1,0 +1,53 @@
+﻿__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+node_modules/
+frontend/dist/
+!frontend/dist/.gitkeep
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/.vite/
+.DS_Store
+Thumbs.db
+
+# Large or generated model/data artifacts
+/datasets/
+shared-models/**/*.onnx
+shared-models/**/*.pt
+shared-models/**/*.pth
+shared-models/**/*.engine
+shared-models/**/*.plan
+!shared-models/cross_camera_tracking/person_detector_yolov8n_v1.0.0_fp32.onnx
+artifacts/packages/**/*.onnx
+artifacts/packages/**/*.pt
+artifacts/packages/**/*.pth
+artifacts/*.sqlite3
+artifacts/*.sqlite3-journal
+artifacts/*.txt
+artifacts/*.log
+artifacts/test_runs/
+experiments/local_runs/
+
+# Keep lightweight descriptors in Git
+!artifacts/packages/.gitkeep
+!experiments/local_runs/.gitkeep
+
+# Local environment and build metadata
+*.egg-info/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Runtime artifacts are regenerated locally
+artifacts/**
+!artifacts/
+!artifacts/packages/
+!artifacts/packages/.gitkeep
+

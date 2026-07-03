@@ -1,0 +1,132 @@
+﻿# Vision Model Lab
+
+当前版本：`0.4.0`。完整变更见 [CHANGELOG.md](CHANGELOG.md)，本次发布说明见 [docs/RELEASE_0.4.0.md](docs/RELEASE_0.4.0.md)。
+
+`vision-model-lab` 是独立于 `gpu-services` 的视觉模型研发与交付仓库。它负责数据版本、标注规范、实验记录、评估、ONNX 导出和标准模型包交付；推理服务只消费 ONNX、模型卡、labels、样例和 `models.yml` 建议片段。
+
+## 当前能力
+
+- 标准模型包创建与校验。
+- 模型命名、模型卡、labels、样例、sha256 校验。
+- JSONL 数据 manifest 校验。
+- FastAPI 管理接口。
+- React/TypeScript 管理台源码，包含流水线、任务详情、模型包、实验、数据与契约入口。
+- YOLO 检测、ReID、分类、分割的本地基线适配器；配置 `training.command`、`export.command`、`evaluation.command` 后会执行真实外部框架命令并记录日志。
+- 实验记录、流水线运行、任务日志、产物索引、模型包校验、数据集版本、模型注册、发布审批、灰度/回滚和审计事件的元数据存储。
+- local/S3/MinIO 对象存储入口、上传接口、误差样本摘要和可选 Bearer Token 鉴权。
+
+## 一键启动
+
+Windows 本地开发可直接双击根目录的 `start.bat`，或在 PowerShell 中执行：
+
+```powershell
+.\start.ps1
+```
+
+脚本会读取 `.env`，创建/复用 `.venv`，安装 Python 依赖，安装并构建前端，初始化元数据存储，然后启动 API 和管理台。
+
+常用参数：
+
+```powershell
+.\start.ps1 -Port 8080
+.\start.ps1 -SkipInstall -SkipFrontendBuild
+```
+
+启动后访问：
+
+- 管理台：`http://127.0.0.1:8080/`
+- OpenAPI：`http://127.0.0.1:8080/docs`
+- 健康检查：`http://127.0.0.1:8080/health`
+## 快速命令
+
+```powershell
+python -m pytest
+python scripts/prepare_dataset.py data/manifests/example_train_v1.jsonl
+python scripts/validate_contract.py models-fragment configs/export/models.fragment.template.yml
+python scripts/validate_contract.py release-decision configs/export/release-decision.template.yml
+python scripts/train.py --config configs/experiments/reference_identity.yml
+python scripts/export_onnx.py --config configs/experiments/reference_identity.yml
+python scripts/evaluate.py --config configs/experiments/reference_identity.yml
+python scripts/run_pipeline.py --config configs/experiments/detection_yolo_baseline.yml --package
+python scripts/validate_model_package.py shared-models --allow-missing-sidecars --allow-missing-examples
+python scripts/serve_api.py --host 127.0.0.1 --port 8080
+python scripts/runtime_check.py --base-url http://127.0.0.1:8080
+```
+
+安装为本地开发包后也可以使用：
+
+```powershell
+pip install -e .[dev]
+vmlab --help
+```
+
+## 标准模型包
+
+```text
+shared-models/
+  <project_name>/
+    <artifact_name>.onnx
+    <artifact_name>.model-card.yml
+    <artifact_name>.labels.txt
+    <artifact_name>.examples/
+      frame_001.jpg
+      frame_001.expected.json
+```
+
+模型文件命名：
+
+```text
+<task>_<architecture>_v<semver>_<precision>.onnx
+```
+
+示例：
+
+```text
+person_detector_yolov8n_v1.0.0_fp32.onnx
+person_reid_osnet_ibn_x1_0_v1.1.0_fp32.onnx
+defect_classifier_resnet50_v2.0.0_fp16.onnx
+```
+
+## 前后端设计
+
+- 核心语言：Python 3.11+。
+- API：FastAPI。
+- 元数据：SQLite 默认，PostgreSQL 可选。
+- 前端：React + TypeScript + Vite。
+- 大文件：NAS、MinIO、S3 或本地挂载目录，不提交 Git；当前内置 local/S3/MinIO 对象存储 provider。
+
+更多设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/DELIVERY_STANDARD.md](docs/DELIVERY_STANDARD.md) 和 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
+
+生产部署和验收见 [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md)。
+
+版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+启动后访问：
+
+- 管理台：`http://127.0.0.1:8080/`
+- OpenAPI：`http://127.0.0.1:8080/docs`
+- 健康检查：`http://127.0.0.1:8080/health`
+
+## 近期工程化增强
+
+- API 静态文件回退和模型包 `model_id` 已增加路径边界校验，防止读取工作区或包目录外文件。
+- 流水线支持异步 job：`POST /api/pipelines/run` 可传 `{"async": true}`，并通过 `/api/pipelines/jobs` 查询、取消或重试。
+- 外部训练命令默认禁用 shell 字符串，只允许 argv list；可通过 `VMLAB_ALLOW_SHELL_COMMANDS` 显式兼容旧配置。
+- 本地对象存储、上传大小、pipeline worker 数、外部命令超时和日志长度均可通过环境变量配置。
+- SQLite 元数据存储使用 journal mode 逐级回退、busy timeout 和线程锁；多实例生产部署仍建议迁移 PostgreSQL。
+## 0.3.0 环境与发布说明
+
+- 推荐使用项目虚拟环境：`.\.venv\Scripts\python.exe -m pip check` 和 `.\.venv\Scripts\python.exe -m pytest` 均已验证通过。
+- 全局 Python 环境依赖冲突已修复，`python -m pip check` 当前通过。
+- Dockerfile 默认基础镜像使用已验证可访问的镜像源；仍可通过 `NODE_IMAGE`、`PYTHON_IMAGE` build args 覆盖。
+- Windows 代理残留已备份到 `artifacts/windows-proxy-before-20260703184731.txt` 后清理，Docker 默认构建已通过。
+
+## 0.4.0 MLOps 与存储扩展
+
+- 流水线 job 会记录阶段日志和产物索引，前端“运行详情”可查看日志、错误和产物链接。
+- 新增数据集版本、模型注册、发布审批和灰度/回滚 API，支撑长期 MLOps 流程。
+- `VMLAB_STORAGE_BACKEND` 支持 `local`、`s3`、`minio`；S3/MinIO 需要安装 `vision-model-lab[s3]`。
+- `VMLAB_METADATA_DB` 支持 SQLite 路径和 PostgreSQL DSN；PostgreSQL 需要安装 `vision-model-lab[postgres]`。
+- 新增 Alembic 迁移目录；轻量环境可执行 `vmlab storage migrate`，正式环境可执行 `alembic upgrade head`。
+- 新增生产框架 adapter 入口，部署侧配置 argv 命令后可接入 Ultralytics、TorchReID、TorchVision 或分割框架。
+

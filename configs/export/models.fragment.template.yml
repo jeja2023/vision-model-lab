@@ -1,0 +1,25 @@
+models:
+  cross_camera_tracking/person_detector_yolov8n_v1.0.0_fp32.onnx:
+    task: detection
+    type: yolo
+    runtime: onnxruntime
+    version: 1.0.0
+    precision: fp32
+    input:
+      size: [640, 640]
+      layout: nchw
+      dtype: float32
+      color: rgb
+      resize: letterbox
+      normalize: none
+    output:
+      format: yolo
+      classes: person
+      class_filter: [person]
+      confidence: 0.25
+      iou: 0.45
+      max_detections: 100
+    artifact:
+      model_card: person_detector_yolov8n_v1.0.0_fp32.model-card.yml
+      labels: person_detector_yolov8n_v1.0.0_fp32.labels.txt
+

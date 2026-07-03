@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the Vision Model Lab management API")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--reload", action="store_true")
+    parser.add_argument("--metadata-db", default=os.environ.get("VMLAB_METADATA_DB", ":memory:"))
+    args = parser.parse_args()
+
+    os.environ.setdefault("VMLAB_WORKSPACE", str(Path(__file__).resolve().parents[1]))
+    os.environ["VMLAB_METADATA_DB"] = args.metadata_db
+
+    import uvicorn
+
+    uvicorn.run(
+        "vision_model_lab.api:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        reload_dirs=[str(Path(__file__).resolve().parents[1] / "src")] if args.reload else None,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

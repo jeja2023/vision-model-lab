@@ -1,0 +1,22 @@
+services:
+  vision-model-lab:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      VMLAB_WORKSPACE: /app
+      VMLAB_METADATA_DB: artifacts/vision_model_lab.sqlite3
+      VMLAB_CORS_ORIGINS: http://127.0.0.1:5173,http://localhost:5173
+      VMLAB_SERVE_FRONTEND: "true"
+      VMLAB_STORAGE_BACKEND: local
+      VMLAB_STORAGE_URI: artifacts/object-store
+      VMLAB_MAX_PACKAGE_SCAN_FILES: "500"
+      VMLAB_MAX_UPLOAD_BYTES: "524288000"
+      VMLAB_PIPELINE_WORKERS: "2"
+      VMLAB_EXTERNAL_COMMAND_TIMEOUT_SECONDS: "3600"
+      VMLAB_EXTERNAL_COMMAND_LOG_MAX_CHARS: "20000"
+      VMLAB_ALLOW_SHELL_COMMANDS: "false"
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./shared-models:/app/shared-models
+      - ./data:/app/data:ro

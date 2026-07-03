@@ -1,0 +1,24 @@
+dataset:
+  name: person_detection_dataset
+  version: 1.0.0
+  task: detection
+  owner: algorithm
+  storage_root: s3://bucket/person_detection
+
+splits:
+  train: data/manifests/person_detection_train_v1.jsonl
+  val: data/manifests/person_detection_val_v1.jsonl
+  test: data/manifests/person_detection_test_v1.jsonl
+  regression: data/manifests/person_detection_regression_v1.jsonl
+  edge: data/manifests/person_detection_edge_v1.jsonl
+
+versioning:
+  major: task_or_label_definition_changed
+  minor: new_data_or_quality_improvement
+  patch: small_annotation_fix
+
+quality_gate:
+  review_ratio: 0.1
+  high_risk_review_ratio: 0.3
+  require_review_report: true
+

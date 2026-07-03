@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc*
+.pytest_cache/
+pytest-cache-files-*/
+artifacts/*.sqlite3
+artifacts/*.sqlite3-journal
+artifacts/*.txt
+artifacts/test_runs/
+frontend/node_modules/
+frontend/dist/
+

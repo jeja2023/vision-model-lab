@@ -1,0 +1,38 @@
+experiment:
+  id: defect_classifier_20260609_001
+  task: classification
+  project: quality_inspection
+  status: planned
+  seed: 42
+
+dataset:
+  name: defect_classification_dataset
+  version: 1.0.0
+
+model:
+  architecture: resnet50
+  version: 1.0.0
+  input_size: [224, 224]
+
+labels:
+  - normal
+  - defect
+
+training:
+  adapter: classification_baseline
+  epochs: 30
+  batch_size: 32
+
+evaluation:
+  adapter: classification_baseline
+  primary_metric: accuracy
+  expected_metrics:
+    accuracy: 0.01
+    f1: 0.01
+
+export:
+  adapter: classification_baseline
+  artifact_name: defect_classifier_resnet50_v1.0.0_fp32.onnx
+  format: onnx
+  precision: fp32
+

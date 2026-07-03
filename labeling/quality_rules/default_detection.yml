@@ -1,0 +1,19 @@
+quality_rules:
+  task: detection
+  first_annotator_full_review_count: 500
+  stable_annotator_review_ratio: 0.1
+  high_risk_class_review_ratio: 0.3
+  require_report_on_dataset_version_change: true
+
+metrics:
+  - annotation_pass_rate
+  - class_confusion_count
+  - bbox_mean_deviation
+  - missing_label_rate
+  - duplicate_label_rate
+  - uncertain_ratio
+
+ignore_policy:
+  min_visible_pixels: 8
+  allow_uncertain: true
+

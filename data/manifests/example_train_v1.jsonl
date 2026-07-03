@@ -1,0 +1,3 @@
+{"image":"s3://bucket/project/frame001.jpg","label":"s3://bucket/project/frame001.json","split":"train","source":"camera_01","tags":["day","indoor"],"dataset_version":"1.0.0"}
+{"image":"s3://bucket/project/frame002.jpg","label":"s3://bucket/project/frame002.json","split":"val","source":"camera_02","tags":["night","outdoor"],"dataset_version":"1.0.0"}
+
