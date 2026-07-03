@@ -17,32 +17,25 @@
 
 ## 一键启动
 
-Windows 本地开发可直接双击根目录的 `start.bat`。跨平台或命令行启动推荐使用 Python 脚本：
+Windows 本地开发可直接双击根目录的 `start.bat`。跨平台或命令行启动使用 Python 脚本：
 
 ```powershell
-python start.py
+python scripts/start_lab.py
 ```
 
-脚本会读取 `.env`，创建/复用 `.venv`，安装 Python 依赖，安装并构建前端，初始化元数据存储，然后启动 API 和管理台。`start.bat` 会自动调用 `start.py`，`start.ps1` 仅作为旧命令兼容入口保留。
+脚本会读取 `.env`，创建或复用 `.venv`，安装 Python 依赖，安装并构建前端，初始化元数据存储，然后启动 API 和管理台。`start.bat` 仅负责调用这个 Python 脚本，根目录不再保留其他启动入口。
 
 常用参数：
 
 ```powershell
-python start.py --port 8080
-python start.py --skip-install --skip-frontend-build
-```
-
-兼容旧 PowerShell 参数：
-
-```powershell
-.\start.ps1 -Port 8080
-.\start.ps1 -SkipInstall -SkipFrontendBuild
+python scripts/start_lab.py --port 8080
+python scripts/start_lab.py --skip-install --skip-frontend-build
 ```
 
 启动后访问：
 
 - 管理台：`http://127.0.0.1:8080/`
-- OpenAPI：`http://127.0.0.1:8080/docs`
+- 接口文档：`http://127.0.0.1:8080/docs`
 - 健康检查：`http://127.0.0.1:8080/health`
 
 ## 快速命令

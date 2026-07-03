@@ -8,16 +8,26 @@ import subprocess
 import sys
 
 
+class ChineseArgumentParser(argparse.ArgumentParser):
+    def format_usage(self) -> str:
+        return super().format_usage().replace("usage:", "用法:")
+
+    def format_help(self) -> str:
+        return super().format_help().replace("usage:", "用法:").replace("options:", "选项:")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Start Vision Model Lab locally.")
-    parser.add_argument("--host", "--hostname", "-HostName", dest="host", default="127.0.0.1")
-    parser.add_argument("--port", "-Port", dest="port", type=int, default=8080)
-    parser.add_argument("--skip-install", "-SkipInstall", dest="skip_install", action="store_true")
+    parser = ChineseArgumentParser(description="本地启动视觉模型实验室。", add_help=False)
+    parser.add_argument("-h", "--help", action="help", help="显示帮助信息并退出。")
+    parser.add_argument("--host", "--hostname", "-HostName", dest="host", default="127.0.0.1", help="监听地址。")
+    parser.add_argument("--port", "-Port", dest="port", type=int, default=8080, help="监听端口。")
+    parser.add_argument("--skip-install", "-SkipInstall", dest="skip_install", action="store_true", help="跳过 Python 依赖安装。")
     parser.add_argument(
         "--skip-frontend-build",
         "-SkipFrontendBuild",
         dest="skip_frontend_build",
         action="store_true",
+        help="跳过前端依赖安装与构建。",
     )
     return parser.parse_args(argv)
 
@@ -47,7 +57,7 @@ def venv_python(root: Path) -> Path:
 
 def run(command: list[str | Path], *, cwd: Path) -> None:
     printable = " ".join(str(part) for part in command)
-    print(f"[run] {printable}", flush=True)
+    print(f"[执行] {printable}", flush=True)
     subprocess.run([str(part) for part in command], cwd=str(cwd), check=True)
 
 
@@ -63,10 +73,10 @@ def ensure_virtualenv(root: Path) -> Path:
     if python_path.exists():
         return python_path
 
-    print("[setup] Creating .venv...", flush=True)
+    print("[准备] 正在创建 .venv...", flush=True)
     run([sys.executable, "-m", "venv", ".venv"], cwd=root)
     if not python_path.exists():
-        raise RuntimeError(f"Virtual environment Python was not created at {python_path}")
+        raise RuntimeError(f"虚拟环境 Python 未创建成功：{python_path}")
     return python_path
 
 
@@ -76,19 +86,19 @@ def ensure_frontend(root: Path, skip_build: bool) -> None:
 
     npm = shutil.which("npm.cmd") or shutil.which("npm")
     if not npm:
-        print("[warn] npm not found; skipping frontend build. Existing frontend/dist will be used if present.")
+        print("[提示] 未找到 npm，跳过前端构建；如已存在 frontend/dist，将继续使用现有构建产物。")
         return
 
     frontend = root / "frontend"
     if not frontend.exists():
-        print("[warn] frontend directory not found; skipping frontend build.")
+        print("[提示] 未找到 frontend 目录，跳过前端构建。")
         return
 
     if not (frontend / "node_modules").exists():
-        print("[setup] Installing frontend dependencies...", flush=True)
+        print("[准备] 正在安装前端依赖...", flush=True)
         run(command_for_executable(npm, "ci"), cwd=frontend)
 
-    print("[setup] Building frontend...", flush=True)
+    print("[准备] 正在构建前端...", flush=True)
     run(command_for_executable(npm, "run", "build"), cwd=frontend)
 
 
@@ -105,10 +115,10 @@ def configure_environment(root: Path) -> None:
 
 def start_api(root: Path, python_path: Path, host: str, port: int) -> int:
     print("", flush=True)
-    print("Vision Model Lab is starting...", flush=True)
-    print(f"Management UI: http://{host}:{port}/", flush=True)
-    print(f"OpenAPI:       http://{host}:{port}/docs", flush=True)
-    print(f"Health:        http://{host}:{port}/health", flush=True)
+    print("视觉模型实验室正在启动...", flush=True)
+    print(f"管理台：    http://{host}:{port}/", flush=True)
+    print(f"接口文档：  http://{host}:{port}/docs", flush=True)
+    print(f"健康检查：  http://{host}:{port}/health", flush=True)
     print("", flush=True)
 
     command = [
@@ -129,19 +139,19 @@ def start_api(root: Path, python_path: Path, host: str, port: int) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parents[1]
     os.chdir(root)
 
     configure_environment(root)
     python_path = ensure_virtualenv(root)
 
     if not args.skip_install:
-        print("[setup] Installing Python dependencies...", flush=True)
+        print("[准备] 正在安装 Python 依赖...", flush=True)
         run([python_path, "-m", "pip", "install", "-e", ".[dev]"], cwd=root)
 
     ensure_frontend(root, args.skip_frontend_build)
 
-    print("[setup] Initializing metadata storage...", flush=True)
+    print("[准备] 正在初始化元数据存储...", flush=True)
     run(
         [
             python_path,
