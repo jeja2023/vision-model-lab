@@ -1,4 +1,4 @@
-﻿# Vision Model Lab
+# Vision Model Lab
 
 当前版本：`0.4.0`。完整变更见 [CHANGELOG.md](CHANGELOG.md)，本次发布说明见 [docs/RELEASE_0.4.0.md](docs/RELEASE_0.4.0.md)。
 
@@ -17,15 +17,22 @@
 
 ## 一键启动
 
-Windows 本地开发可直接双击根目录的 `start.bat`，或在 PowerShell 中执行：
+Windows 本地开发可直接双击根目录的 `start.bat`。跨平台或命令行启动推荐使用 Python 脚本：
 
 ```powershell
-.\start.ps1
+python start.py
 ```
 
-脚本会读取 `.env`，创建/复用 `.venv`，安装 Python 依赖，安装并构建前端，初始化元数据存储，然后启动 API 和管理台。
+脚本会读取 `.env`，创建/复用 `.venv`，安装 Python 依赖，安装并构建前端，初始化元数据存储，然后启动 API 和管理台。`start.bat` 会自动调用 `start.py`，`start.ps1` 仅作为旧命令兼容入口保留。
 
 常用参数：
+
+```powershell
+python start.py --port 8080
+python start.py --skip-install --skip-frontend-build
+```
+
+兼容旧 PowerShell 参数：
 
 ```powershell
 .\start.ps1 -Port 8080
@@ -37,6 +44,7 @@ Windows 本地开发可直接双击根目录的 `start.bat`，或在 PowerShell 
 - 管理台：`http://127.0.0.1:8080/`
 - OpenAPI：`http://127.0.0.1:8080/docs`
 - 健康检查：`http://127.0.0.1:8080/health`
+
 ## 快速命令
 
 ```powershell
