@@ -1,6 +1,35 @@
-﻿# 更新日志
+# 更新日志
 
 本文件记录 `vision-model-lab` 的主要功能变更、交付状态和验证结果。格式参考 Keep a Changelog，版本号遵循语义化版本。
+
+## [0.4.1] - 2026-07-13
+
+### 新增
+
+- 新增流水线取消闭环：训练、导出、评估和打包阶段都会检查取消请求，外部命令会终止子进程并返回 `cancelled` 结果。
+- 新增 job 取消详情：异步任务会记录 `cancelled_at`、`cancelled_stage`、`cancelled_reason` 和已生成产物索引。
+- 新增管理台 `queued`、`cancelled`、`cancellation_requested` 中文状态，以及 job 详情里的取消提示、取消时间、取消阶段和取消原因。
+- 新增 `docs/RELEASE_0.4.1.md`，汇总本次取消链路、迁移、扫描和前端反馈补丁。
+
+### 变更
+
+- 版本号统一升级到 `0.4.1`，同步 Python 包、运行时 `__version__`、前端包版本和 lockfile。
+- 异步 job 完成时会按 `completed`、`failed`、`cancelled` 分别记录审计事件；同步运行也会记录取消或失败动作。
+- 模型包扫描改为增量收集 ONNX 文件，超过 `VMLAB_MAX_PACKAGE_SCAN_FILES` 后提前停止，避免大目录一次性排序扫描。
+- 管理台状态徽章新增进行中和中性样式，取消中与已取消不再被误判为失败展示。
+
+### 修复
+
+- 修复 Alembic baseline 空库迁移表结构不完整的问题，补齐实验、模型包校验、流水线运行、job、审计、产物、数据集版本、模型注册、发布审批和灰度/回滚表。
+- 修复 `VMLAB_METADATA_DB` 使用普通 SQLite 文件路径时 Alembic 无法识别为 SQLAlchemy URL 的问题。
+- 修复 reference/local adapter 在取消请求下仍继续执行后续阶段的问题。
+- 修复前端对 `cancellation_requested` 仍显示取消按钮、job 详情缺少取消反馈的问题。
+
+### 验证
+
+- `python -m pytest` 通过：39 passed，2 warnings。
+- `npm run build` 通过，前端包版本为 `0.4.1`。
+- `python -m compileall -q src tests migrations` 通过。
 
 ## [0.4.0] - 2026-07-03
 

@@ -1,6 +1,6 @@
 # Vision Model Lab
 
-当前版本：`0.4.0`。完整变更见 [CHANGELOG.md](CHANGELOG.md)，本次发布说明见 [docs/RELEASE_0.4.0.md](docs/RELEASE_0.4.0.md)。
+当前版本：`0.4.1`。完整变更见 [CHANGELOG.md](CHANGELOG.md)，本次发布说明见 [docs/RELEASE_0.4.1.md](docs/RELEASE_0.4.1.md)。
 
 `vision-model-lab` 是独立于 `gpu-services` 的视觉模型研发与交付仓库。它负责数据版本、标注规范、实验记录、评估、ONNX 导出和标准模型包交付；推理服务只消费 ONNX、模型卡、labels、样例和 `models.yml` 建议片段。
 
@@ -131,3 +131,9 @@ defect_classifier_resnet50_v2.0.0_fp16.onnx
 - 新增 Alembic 迁移目录；轻量环境可执行 `vmlab storage migrate`，正式环境可执行 `alembic upgrade head`。
 - 新增生产框架 adapter 入口，部署侧配置 argv 命令后可接入 Ultralytics、TorchReID、TorchVision 或分割框架。
 
+## 0.4.1 取消闭环与稳定性补丁
+
+- 流水线 job 支持从 `cancellation_requested` 到 `cancelled` 的完整取消闭环，会记录取消时间、取消阶段、取消原因和已生成产物。
+- 管理台已补齐 `queued`、`cancelled`、`cancellation_requested` 中文状态，job 详情可直接查看取消反馈。
+- Alembic baseline 迁移已补齐核心表结构，`VMLAB_METADATA_DB` 支持普通 SQLite 文件路径。
+- 模型包扫描会在超过上限后提前停止，避免大目录一次性排序扫描。

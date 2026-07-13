@@ -12,6 +12,61 @@ depends_on = None
 
 def upgrade() -> None:
     op.create_table(
+        "experiments",
+        sa.Column("id", sa.Text(), primary_key=True),
+        sa.Column("task", sa.Text(), nullable=False),
+        sa.Column("dataset", sa.Text(), nullable=False),
+        sa.Column("model", sa.Text(), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("package", sa.Text(), nullable=True),
+        sa.Column("metrics_json", sa.Text(), nullable=False, server_default="{}"),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+    )
+    op.create_table(
+        "package_validations",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("package_dir", sa.Text(), nullable=False),
+        sa.Column("model_file", sa.Text(), nullable=True),
+        sa.Column("ok", sa.Integer(), nullable=False),
+        sa.Column("sha256", sa.Text(), nullable=True),
+        sa.Column("report_json", sa.Text(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+    )
+    op.create_table(
+        "pipeline_runs",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("config_path", sa.Text(), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("report_json", sa.Text(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+    )
+    op.create_table(
+        "pipeline_jobs",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("config_path", sa.Text(), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("request_json", sa.Text(), nullable=False),
+        sa.Column("result_json", sa.Text(), nullable=True),
+        sa.Column("error", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column("started_at", sa.DateTime(), nullable=True),
+        sa.Column("completed_at", sa.DateTime(), nullable=True),
+        sa.Column("cancelled_at", sa.DateTime(), nullable=True),
+        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+    )
+    op.create_index("idx_pipeline_jobs_status", "pipeline_jobs", ["status"])
+    op.create_table(
+        "audit_events",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("actor", sa.Text(), nullable=False),
+        sa.Column("action", sa.Text(), nullable=False),
+        sa.Column("target", sa.Text(), nullable=False),
+        sa.Column("detail_json", sa.Text(), nullable=False, server_default="{}"),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+    )
+    op.create_index("idx_audit_events_created_at", "audit_events", ["created_at"])
+    op.create_table(
         "pipeline_job_logs",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("job_id", sa.Integer(), nullable=False),
@@ -102,3 +157,10 @@ def downgrade() -> None:
     op.drop_table("pipeline_artifacts")
     op.drop_index("idx_pipeline_job_logs_job_id", table_name="pipeline_job_logs")
     op.drop_table("pipeline_job_logs")
+    op.drop_index("idx_audit_events_created_at", table_name="audit_events")
+    op.drop_table("audit_events")
+    op.drop_index("idx_pipeline_jobs_status", table_name="pipeline_jobs")
+    op.drop_table("pipeline_jobs")
+    op.drop_table("pipeline_runs")
+    op.drop_table("package_validations")
+    op.drop_table("experiments")

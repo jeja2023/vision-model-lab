@@ -314,6 +314,16 @@ input[type="file"] {
   color: #991b1b;
 }
 
+.badge.warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.badge.neutral {
+  background: #e2e8f0;
+  color: #334155;
+}
+
 .empty-row,
 .inline-message {
   color: #64748b;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from vision_model_lab.adapters.base import AdapterResult, TaskAdapter
@@ -66,13 +67,18 @@ def resolve_adapter(config_path: str | Path, stage: str) -> TaskAdapter:
     return ADAPTERS[adapter_name]
 
 
-def run_stage(stage: str, config_path: str | Path, *, onnx_path: str | Path | None = None) -> AdapterResult:
+def run_stage(
+    stage: str,
+    config_path: str | Path,
+    *,
+    onnx_path: str | Path | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> AdapterResult:
     adapter = resolve_adapter(config_path, stage)
     if stage == "training":
-        return adapter.train(config_path)
+        return adapter.train(config_path, should_cancel=should_cancel)
     if stage == "export":
-        return adapter.export(config_path)
+        return adapter.export(config_path, should_cancel=should_cancel)
     if stage == "evaluation":
-        return adapter.evaluate(config_path, onnx_path)
+        return adapter.evaluate(config_path, onnx_path, should_cancel=should_cancel)
     raise ValueError(f"Unsupported stage: {stage}")
-

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from vision_model_lab.adapters.registry import run_stage
 from vision_model_lab.packaging.model_package import create_model_package, validate_model_package
@@ -19,7 +20,9 @@ def _write_synthetic_image(path: Path) -> None:
     if current != bytes.fromhex("ffd8ff"):
         path.write_bytes(SYNTHETIC_JPEG_BYTES)
 
+
 PipelineEventSink = Callable[[str, str, dict[str, Any]], None]
+CancelCheck = Callable[[], bool]
 
 
 def _emit(event_sink: PipelineEventSink | None, stage: str, message: str, detail: dict[str, Any] | None = None) -> None:
@@ -27,8 +30,33 @@ def _emit(event_sink: PipelineEventSink | None, stage: str, message: str, detail
         event_sink(stage, message, detail or {})
 
 
+def _cancel_requested(should_cancel: CancelCheck | None) -> bool:
+    return bool(should_cancel and should_cancel())
+
+
 def _pipeline_status(stage_results: list[dict[str, Any]]) -> str:
-    return "failed" if any(result.get("status") == "failed" for result in stage_results) else "completed"
+    statuses = {str(result.get("status", "")) for result in stage_results}
+    if "cancelled" in statuses:
+        return "cancelled"
+    return "failed" if "failed" in statuses else "completed"
+
+
+def _cancelled_report(
+    config_path: str | Path,
+    stage_payloads: dict[str, dict[str, Any]],
+    *,
+    cancelled_stage: str,
+    reason: str,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "status": "cancelled",
+        "config": str(config_path),
+        "cancelled_stage": cancelled_stage,
+        "cancelled_reason": reason,
+        **stage_payloads,
+    }
+    report["artifacts"] = collect_pipeline_artifacts(report)
+    return report
 
 
 def collect_pipeline_artifacts(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -70,35 +98,79 @@ def collect_pipeline_artifacts(report: dict[str, Any]) -> list[dict[str, Any]]:
             })
     return artifacts
 
+
+def _record_stage_result(
+    stage_payloads: dict[str, dict[str, Any]],
+    stage: str,
+    result: Any,
+    event_sink: PipelineEventSink | None,
+) -> dict[str, Any]:
+    payload = result.to_dict()
+    stage_payloads[stage] = payload
+    _emit(event_sink, stage, str(payload.get("status", result.status)), payload)
+    return payload
+
+
 def run_experiment_pipeline(
     config_path: str | Path,
     *,
     package: bool = False,
     output_root: str | Path = "shared-models",
     event_sink: PipelineEventSink | None = None,
+    should_cancel: CancelCheck | None = None,
 ) -> dict[str, Any]:
+    stage_payloads: dict[str, dict[str, Any]] = {}
+
+    if _cancel_requested(should_cancel):
+        _emit(event_sink, "job", "cancelled before training", {"config_path": str(config_path)})
+        return _cancelled_report(config_path, stage_payloads, cancelled_stage="training", reason="Cancellation requested before training started")
+
     _emit(event_sink, "training", "started", {"config_path": str(config_path)})
-    train_result = run_stage("training", config_path)
-    _emit(event_sink, "training", train_result.status, train_result.to_dict())
+    train_result = run_stage("training", config_path, should_cancel=should_cancel)
+    train_payload = _record_stage_result(stage_payloads, "training", train_result, event_sink)
+    if train_payload.get("status") == "cancelled":
+        return _cancelled_report(
+            config_path,
+            stage_payloads,
+            cancelled_stage="training",
+            reason=str(train_payload.get("message") or "Training was cancelled"),
+        )
+    if _cancel_requested(should_cancel):
+        return _cancelled_report(config_path, stage_payloads, cancelled_stage="training", reason="Cancellation requested after training")
 
     _emit(event_sink, "export", "started", {"config_path": str(config_path)})
-    export_result = run_stage("export", config_path)
-    _emit(event_sink, "export", export_result.status, export_result.to_dict())
+    export_result = run_stage("export", config_path, should_cancel=should_cancel)
+    export_payload = _record_stage_result(stage_payloads, "export", export_result, event_sink)
+    if export_payload.get("status") == "cancelled":
+        return _cancelled_report(
+            config_path,
+            stage_payloads,
+            cancelled_stage="export",
+            reason=str(export_payload.get("message") or "Export was cancelled"),
+        )
+    if _cancel_requested(should_cancel):
+        return _cancelled_report(config_path, stage_payloads, cancelled_stage="export", reason="Cancellation requested after export")
 
     onnx_path = export_result.payload.get("onnx") or export_result.path
     _emit(event_sink, "evaluation", "started", {"onnx_path": str(onnx_path)})
-    eval_result = run_stage("evaluation", config_path, onnx_path=onnx_path)
-    _emit(event_sink, "evaluation", eval_result.status, eval_result.to_dict())
+    eval_result = run_stage("evaluation", config_path, onnx_path=onnx_path, should_cancel=should_cancel)
+    eval_payload = _record_stage_result(stage_payloads, "evaluation", eval_result, event_sink)
+    if eval_payload.get("status") == "cancelled":
+        return _cancelled_report(
+            config_path,
+            stage_payloads,
+            cancelled_stage="evaluation",
+            reason=str(eval_payload.get("message") or "Evaluation was cancelled"),
+        )
 
-    stage_payloads = [train_result.to_dict(), export_result.to_dict(), eval_result.to_dict()]
     result: dict[str, Any] = {
-        "status": _pipeline_status(stage_payloads),
+        "status": _pipeline_status(list(stage_payloads.values())),
         "config": str(config_path),
-        "training": stage_payloads[0],
-        "export": stage_payloads[1],
-        "evaluation": stage_payloads[2],
+        **stage_payloads,
     }
     if package:
+        if _cancel_requested(should_cancel):
+            return _cancelled_report(config_path, stage_payloads, cancelled_stage="package", reason="Cancellation requested before package creation")
         _emit(event_sink, "package", "started", {"output_root": str(output_root)})
         result["package"] = create_package_from_experiment(config_path, onnx_path=onnx_path, output_root=output_root)
         _emit(event_sink, "package", "completed", result["package"])
@@ -183,4 +255,3 @@ def load_error_cases(path: str | Path) -> dict[str, Any]:
         error_type = str(row.get("type") or row.get("error_type") or "unknown")
         by_type[error_type] = by_type.get(error_type, 0) + 1
     return {"path": str(resolved), "total": len(rows), "by_type": by_type, "cases": rows[:100]}
-

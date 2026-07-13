@@ -214,6 +214,12 @@ def _run_pipeline_job(job_id: int, payload: dict[str, Any]) -> None:
     def event_sink(stage: str, message: str, detail: dict[str, Any]) -> None:
         STORE.record_pipeline_job_log(job_id, stage, message, detail)
 
+    def should_cancel() -> bool:
+        try:
+            return STORE.get_pipeline_job(job_id)["status"] == "cancellation_requested"
+        except KeyError:
+            return False
+
     try:
         job = STORE.mark_pipeline_job_running(job_id)
         if job["status"] == "cancelled":
@@ -225,26 +231,36 @@ def _run_pipeline_job(job_id: int, payload: dict[str, Any]) -> None:
             package=bool(payload.get("package")),
             output_root=payload.get("output_root", "shared-models"),
             event_sink=event_sink,
+            should_cancel=should_cancel,
         )
         run_record = STORE.record_pipeline_run(payload["config_path"], report) if payload.get("persist", True) else None
         _record_pipeline_artifacts(report, job_id=job_id, run_id=int(run_record["id"]) if run_record else None)
+        current = STORE.get_pipeline_job(job_id)
+        if report.get("status") == "cancelled" or current["status"] == "cancellation_requested":
+            STORE.complete_pipeline_job(job_id, report, status="cancelled")
+            STORE.record_pipeline_job_log(job_id, "job", "cancelled", {"config_path": payload["config_path"], "package": bool(payload.get("package"))})
+            STORE.record_audit_event(
+                actor="api",
+                action="pipeline.job.cancelled",
+                target=str(job_id),
+                detail={"config_path": payload["config_path"], "package": bool(payload.get("package"))},
+            )
+            return
+        if report.get("status") == "failed":
+            STORE.fail_pipeline_job(job_id, "Pipeline stage failed", report)
+            STORE.record_audit_event(actor="api", action="pipeline.job.failed", target=str(job_id), detail={"config_path": payload["config_path"], "package": bool(payload.get("package"))})
+            return
+        STORE.complete_pipeline_job(job_id, report, status="completed")
         STORE.record_audit_event(
             actor="api",
             action="pipeline.job.completed",
             target=str(job_id),
             detail={"config_path": payload["config_path"], "package": bool(payload.get("package"))},
         )
-        current = STORE.get_pipeline_job(job_id)
-        if report.get("status") == "failed":
-            STORE.fail_pipeline_job(job_id, "Pipeline stage failed", report)
-            return
-        final_status = "cancelled" if current["status"] == "cancellation_requested" else "completed"
-        STORE.complete_pipeline_job(job_id, report, status=final_status)
     except Exception as exc:  # noqa: BLE001
         STORE.record_pipeline_job_log(job_id, "job", "failed", {"error": str(exc)})
         STORE.fail_pipeline_job(job_id, str(exc))
         STORE.record_audit_event(actor="api", action="pipeline.job.failed", target=str(job_id), detail={"error": str(exc)})
-
 
 def _queue_pipeline_job(payload: dict[str, Any]) -> dict[str, Any]:
     job = STORE.create_pipeline_job(payload["config_path"], payload)
@@ -303,12 +319,15 @@ def scan_packages(
     if not resolved_root.exists():
         return {"root": str(resolved_root), "packages": []}
     packages: list[dict[str, Any]] = []
-    model_files = sorted(resolved_root.rglob("*.onnx"))
-    if len(model_files) > SETTINGS.max_package_scan_files:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Too many ONNX files under {root}; limit is {SETTINGS.max_package_scan_files}",
-        )
+    model_files: list[Path] = []
+    for model_file in resolved_root.rglob("*.onnx"):
+        model_files.append(model_file)
+        if len(model_files) > SETTINGS.max_package_scan_files:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many ONNX files under {root}; limit is {SETTINGS.max_package_scan_files}",
+            )
+    model_files.sort()
     for model_file in model_files:
         result = validate_model_package(
             model_file.parent,
@@ -318,7 +337,6 @@ def scan_packages(
         )
         packages.append(result.to_dict())
     return {"root": str(resolved_root), "packages": packages}
-
 
 @app.get("/api/package-validations")
 def list_package_validations(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
@@ -378,7 +396,12 @@ def run_pipeline_endpoint(request: PipelineRunRequest) -> dict[str, Any]:
     if request.async_run:
         return {"job": _queue_pipeline_job(payload)}
     report = run_experiment_pipeline(config_path, package=request.package, output_root=output_root)
-    STORE.record_audit_event(actor="api", action="pipeline.run", target=str(config_path), detail={"package": request.package})
+    action = "pipeline.run"
+    if report.get("status") == "failed":
+        action = "pipeline.run.failed"
+    elif report.get("status") == "cancelled":
+        action = "pipeline.run.cancelled"
+    STORE.record_audit_event(actor="api", action=action, target=str(config_path), detail={"package": request.package, "status": report.get("status")})
     if request.persist:
         run_record = STORE.record_pipeline_run(str(config_path), report)
         _record_pipeline_artifacts(report, run_id=int(run_record["id"]))

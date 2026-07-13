@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 from vision_model_lab.storage import MetadataStore
@@ -81,3 +85,28 @@ def test_metadata_store_job_logs_artifacts_and_mlops_records() -> None:
     assert model["metrics"] == {"map50": 0.5}
     assert approval["status"] == "approved"
     assert rollout["traffic_percent"] == 10
+
+
+def test_alembic_upgrade_supports_plain_sqlite_path_and_creates_base_tables(workspace_tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    database = workspace_tmp_path / "alembic_upgrade.sqlite3"
+    env = {**os.environ, "VMLAB_WORKSPACE": str(repo_root), "VMLAB_METADATA_DB": str(database)}
+
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=repo_root, env=env, check=True, capture_output=True, text=True)
+
+    with sqlite3.connect(database) as connection:
+        tables = {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
+
+    assert {
+        "experiments",
+        "package_validations",
+        "pipeline_runs",
+        "pipeline_jobs",
+        "audit_events",
+        "pipeline_job_logs",
+        "pipeline_artifacts",
+        "dataset_versions",
+        "model_registry",
+        "release_approvals",
+        "deployment_rollouts",
+    } <= tables

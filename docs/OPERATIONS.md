@@ -1,4 +1,4 @@
-﻿# 运行维护手册
+# 运行维护手册
 
 ## 日常启动
 
@@ -102,5 +102,10 @@ python -m pip check
 - 迁移：轻量环境执行 `vmlab storage migrate`；正式环境安装 `vision-model-lab[migrations]` 后执行 `alembic upgrade head`。
 - MLOps：数据集版本、模型注册、发布审批和灰度/回滚记录都写入元数据存储，生产环境应定期备份。
 - 生产 adapter：`ultralytics_yolo`、`torchreid`、`torchvision_classifier`、`segmentation_framework` 只提供平台入口，训练框架和 argv 命令由部署环境提供。
+## 0.4.1 运维补充
 
-
+- 取消任务时，job 会先进入 `cancellation_requested`，工作线程确认后进入 `cancelled`；排障时优先查看 job 详情中的 `cancelled_stage` 和 `cancelled_reason`。
+- 外部训练/导出/评估命令会在取消请求后终止子进程，部署侧应确保训练脚本能处理终止信号并及时释放 GPU/临时文件。
+- Alembic 使用普通 SQLite 文件路径时无需手动拼接 `sqlite:///`；正式环境仍建议显式配置 PostgreSQL DSN。
+- 大模型目录扫描受 `VMLAB_MAX_PACKAGE_SCAN_FILES` 保护，触顶时应收窄扫描目录或提高上限。
+- 管理台会显示“排队中”“取消中”“已取消”等中文状态，可用 job 详情确认取消时间、阶段、原因和保留产物。

@@ -89,4 +89,5 @@ def test_external_shell_string_command_is_disabled_by_default(workspace_tmp_path
     result = run_stage("training", config)
 
     assert result.status == "failed"
-    assert result.payload["message"] == "External training command executed."
+    assert result.payload["message"] == "External training command failed."
+    assert result.payload["external"]["error_code"] == "external.shell_disabled"

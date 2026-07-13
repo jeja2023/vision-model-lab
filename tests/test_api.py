@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Iterator
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import vision_model_lab.api as api
 from vision_model_lab.storage import MetadataStore
+from vision_model_lab.utils import write_yaml
 
 
 @pytest.fixture(autouse=True)
@@ -180,6 +182,61 @@ def test_async_pipeline_job_completes() -> None:
 
     assert job["status"] == "completed"
     assert job["result"]["status"] == "completed"
+
+
+def test_async_pipeline_job_can_be_cancelled(workspace_tmp_path: Path) -> None:
+    client = _client()
+    marker = workspace_tmp_path / "cancel_marker.txt"
+    config = workspace_tmp_path / "cancel_pipeline.yml"
+    write_yaml(
+        config,
+        {
+            "experiment": {"id": "cancel_pipeline_job", "task": "classification"},
+            "dataset": {"name": "cancel_dataset", "version": "1.0.0"},
+            "model": {"architecture": "resnet50", "version": "1.0.0"},
+            "training": {
+                "adapter": "classification_baseline",
+                "command": [
+                    sys.executable,
+                    "-c",
+                    f"import time; from pathlib import Path; Path(r'{marker.resolve()}').write_text('started', encoding='utf-8'); time.sleep(5)",
+                ],
+            },
+            "evaluation": {"adapter": "classification_baseline"},
+            "export": {"adapter": "classification_baseline", "artifact_name": "cancel_classifier_resnet50_v1.0.0_fp32.onnx"},
+        },
+    )
+
+    response = client.post(
+        "/api/pipelines/run",
+        json={"config_path": str(config), "package": False, "async": True},
+    )
+    assert response.status_code == 200
+    job_id = response.json()["job"]["id"]
+
+    for _ in range(50):
+        job = client.get(f"/api/pipelines/jobs/{job_id}").json()["job"]
+        if job["status"] == "running":
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError(f"job never started: {job['status']}")
+
+    cancel_response = client.post(f"/api/pipelines/jobs/{job_id}/cancel")
+    assert cancel_response.status_code == 200
+
+    for _ in range(80):
+        job_response = client.get(f"/api/pipelines/jobs/{job_id}")
+        assert job_response.status_code == 200
+        job = job_response.json()["job"]
+        if job["status"] == "cancelled":
+            break
+        time.sleep(0.1)
+
+    assert job["status"] == "cancelled"
+    assert job["result"]["status"] == "cancelled"
+    assert job["result"]["cancelled_stage"] == "training"
+
 
 def test_mlops_registry_release_and_rollout_endpoints() -> None:
     client = _client()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -24,12 +25,27 @@ class TaskAdapter(Protocol):
     task: str
     description: str
 
-    def train(self, config_path: str | Path) -> AdapterResult:
+    def train(
+        self,
+        config_path: str | Path,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> AdapterResult:
         ...
 
-    def export(self, config_path: str | Path) -> AdapterResult:
+    def export(
+        self,
+        config_path: str | Path,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> AdapterResult:
         ...
 
-    def evaluate(self, config_path: str | Path, onnx_path: str | Path | None = None) -> AdapterResult:
+    def evaluate(
+        self,
+        config_path: str | Path,
+        onnx_path: str | Path | None = None,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> AdapterResult:
         ...
-

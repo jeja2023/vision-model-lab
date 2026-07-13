@@ -1,5 +1,5 @@
 import { Boxes, Play, RotateCcw, Search, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   analyzeErrors,
   cancelPipelineJob,
@@ -24,6 +24,7 @@ const configOptions = [
 ];
 
 const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
+const cancellableStatuses = new Set(["queued", "running"]);
 
 type PipelineProps = {
   runs: PipelineRunRecord[];
@@ -40,11 +41,77 @@ function metricsText(run?: PipelineRunRecord) {
     .join(" / ");
 }
 
-function jobStatusOk(job: PipelineJobRecord) {
-  return job.status === "completed";
+type StatusTone = "ok" | "warn" | "neutral" | "fail";
+
+type JobDetailField = {
+  label: string;
+  value: string;
+  mono?: boolean;
+};
+
+function jobStatusTone(status: string): StatusTone {
+  if (status === "completed") {
+    return "ok";
+  }
+  if (status === "cancelled") {
+    return "neutral";
+  }
+  if (status === "cancellation_requested" || status === "running" || status === "queued") {
+    return "warn";
+  }
+  return "fail";
+}
+
+function pipelineStageLabel(value?: string | null) {
+  const map: Record<string, string> = {
+    training: "训练",
+    export: "导出",
+    evaluation: "评估",
+    package: "打包"
+  };
+  return value ? map[value] ?? value : "-";
+}
+
+function cancellationReasonLabel(value?: string | null) {
+  const map: Record<string, string> = {
+    "Cancellation requested before training started": "在训练开始前已请求取消",
+    "Cancellation requested after training": "训练完成后已请求取消",
+    "Cancellation requested after export": "导出完成后已请求取消",
+    "Cancellation requested before package creation": "在打包开始前已请求取消",
+    "Training was cancelled": "训练已取消",
+    "Export was cancelled": "导出已取消",
+    "Evaluation was cancelled": "评估已取消"
+  };
+  return value ? map[value] ?? value : "-";
+}
+
+function jobCancellationNote(job: PipelineJobRecord) {
+  if (job.status === "cancellation_requested") {
+    return "取消请求已提交，当前任务正在停止。";
+  }
+  if (job.status === "cancelled") {
+    const stage = job.result?.cancelled_stage ? `，终止于${pipelineStageLabel(job.result.cancelled_stage)}阶段` : "";
+    return `任务已取消${stage}。`;
+  }
+  return "";
+}
+
+function jobDetailFields(job: PipelineJobRecord): JobDetailField[] {
+  const fields: Array<JobDetailField | null> = [
+    { label: "任务编号", value: `#${job.id}` },
+    { label: "配置路径", value: job.config_path, mono: true },
+    { label: "开始时间", value: job.started_at ?? job.created_at },
+    { label: "完成时间", value: job.completed_at ?? "-" },
+    job.cancelled_at || job.status === "cancelled" ? { label: "取消时间", value: job.cancelled_at ?? "-" } : null,
+    job.result?.cancelled_stage ? { label: "取消阶段", value: pipelineStageLabel(job.result.cancelled_stage) } : null,
+    job.result?.cancelled_reason ? { label: "取消原因", value: cancellationReasonLabel(job.result.cancelled_reason) } : null,
+    { label: "错误", value: job.error ?? "-" }
+  ];
+  return fields.filter((field): field is JobDetailField => field !== null);
 }
 
 function errorMessage(error: unknown) {
+
   return error instanceof Error ? error.message : "????";
 }
 
@@ -198,6 +265,8 @@ export function Pipeline({ runs, onRefresh }: PipelineProps) {
     () => adapters.map((adapter) => `${adapter.task}:${adapter.name}`).join(" / "),
     [adapters]
   );
+  const selectedJobCancellationNote = selectedJob ? jobCancellationNote(selectedJob) : "";
+  const selectedJobDetails = selectedJob ? jobDetailFields(selectedJob) : [];
 
   return (
     <div className="page-grid">
@@ -227,7 +296,7 @@ export function Pipeline({ runs, onRefresh }: PipelineProps) {
         </div>
         <div className="summary-line">
           <span>????{groupedAdapters || "-"}</span>
-          {latestJob ? <StatusBadge ok={jobStatusOk(latestJob)} label={zhStatus(latestJob.status)} /> : null}
+          {latestJob ? <StatusBadge tone={jobStatusTone(latestJob.status)} label={zhStatus(latestJob.status)} /> : null}
         </div>
         {message ? <p className="inline-message">{message}</p> : null}
       </section>
@@ -272,15 +341,15 @@ export function Pipeline({ runs, onRefresh }: PipelineProps) {
             >
               <span>#{job.id}</span>
               <span className="mono">{job.config_path}</span>
-              <StatusBadge ok={jobStatusOk(job)} label={zhStatus(job.status)} />
+              <StatusBadge tone={jobStatusTone(job.status)} label={zhStatus(job.status)} />
               <span className="row-actions">
-                {!terminalStatuses.has(job.status) ? (
-                  <button className="icon-button" onClick={(event) => { event.stopPropagation(); void cancelJob(job.id); }} title="??">
+                {cancellableStatuses.has(job.status) ? (
+                  <button className="icon-button" onClick={(event) => { event.stopPropagation(); void cancelJob(job.id); }} title="取消任务">
                     <XCircle size={16} />
                   </button>
                 ) : null}
                 {job.status === "failed" || job.status === "cancelled" ? (
-                  <button className="icon-button" onClick={(event) => { event.stopPropagation(); void retryJob(job.id); }} title="??">
+                  <button className="icon-button" onClick={(event) => { event.stopPropagation(); void retryJob(job.id); }} title="重新运行">
                     <RotateCcw size={16} />
                   </button>
                 ) : null}
@@ -294,21 +363,18 @@ export function Pipeline({ runs, onRefresh }: PipelineProps) {
       <section className="panel wide-panel">
         <div className="panel-header">
           <h1>????</h1>
-          {selectedJob ? <StatusBadge ok={jobStatusOk(selectedJob)} label={zhStatus(selectedJob.status)} /> : null}
+          {selectedJob ? <StatusBadge tone={jobStatusTone(selectedJob.status)} label={zhStatus(selectedJob.status)} /> : null}
         </div>
         {selectedJob ? (
           <>
+                        {selectedJobCancellationNote ? <p className="inline-message">{selectedJobCancellationNote}</p> : null}
             <div className="detail-grid">
-              <span>??</span>
-              <strong>#{selectedJob.id}</strong>
-              <span>??</span>
-              <strong className="mono">{selectedJob.config_path}</strong>
-              <span>??</span>
-              <strong>{selectedJob.started_at ?? selectedJob.created_at}</strong>
-              <span>??</span>
-              <strong>{selectedJob.completed_at ?? "-"}</strong>
-              <span>??</span>
-              <strong>{selectedJob.error ?? "-"}</strong>
+              {selectedJobDetails.map((field) => (
+                <Fragment key={field.label}>
+                  <span>{field.label}</span>
+                  <strong className={field.mono ? "mono" : undefined}>{field.value}</strong>
+                </Fragment>
+              ))}
             </div>
             <div className="detail-columns">
               <div>
@@ -347,7 +413,7 @@ export function Pipeline({ runs, onRefresh }: PipelineProps) {
       <section className="panel">
         <h1>????</h1>
         <div className="summary-line">
-          <StatusBadge ok={latest?.status === "completed"} label={latest ? zhStatus(latest.status) : "??"} />
+          {latest ? <StatusBadge tone={jobStatusTone(latest.status)} label={zhStatus(latest.status)} /> : null}
           <span>{latest?.config_path ?? latest?.report.config ?? "-"}</span>
           <span>{metricsText(latest)}</span>
         </div>
@@ -360,7 +426,7 @@ export function Pipeline({ runs, onRefresh }: PipelineProps) {
           {runs.map((run) => (
             <div className="table-row" key={`${run.id}-${run.created_at}`}>
               <span className="mono">{run.config_path ?? run.report.config ?? "-"}</span>
-              <StatusBadge ok={run.status === "completed"} label={zhStatus(run.status)} />
+              <StatusBadge tone={jobStatusTone(run.status)} label={zhStatus(run.status)} />
               <span>{metricsText(run)}</span>
             </div>
           ))}

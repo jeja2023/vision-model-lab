@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,21 @@ def _experiment_dir(config: dict[str, Any], root: str | Path = "experiments/loca
     experiment = config.get("experiment", {})
     experiment_id = experiment.get("id", "reference_identity")
     return ensure_dir(Path(root) / str(experiment_id))
+
+
+def _cancelled_result(config_path: str | Path, *, stage: str, report_path: Path) -> AdapterResult:
+    message = f"{stage} cancelled before execution."
+    write_json(
+        report_path,
+        {
+            "status": "cancelled",
+            "adapter": "reference_identity",
+            "config": str(config_path),
+            "stage": stage,
+            "message": message,
+        },
+    )
+    return AdapterResult("cancelled", report_path, {"report": str(report_path), "message": message})
 
 
 def run_training(config_path: str | Path) -> Path:
@@ -79,15 +95,42 @@ class ReferenceIdentityAdapter:
     task = "reference"
     description = "Deterministic identity ONNX smoke adapter."
 
-    def train(self, config_path: str | Path) -> AdapterResult:
+    def train(
+        self,
+        config_path: str | Path,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> AdapterResult:
+        if should_cancel and should_cancel():
+            config = read_yaml(config_path)
+            return _cancelled_result(config_path, stage="training", report_path=_experiment_dir(config) / "train.report.json")
         report_path = run_training(config_path)
         return AdapterResult("completed", report_path, {"report": str(report_path)})
 
-    def export(self, config_path: str | Path) -> AdapterResult:
+    def export(
+        self,
+        config_path: str | Path,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> AdapterResult:
+        if should_cancel and should_cancel():
+            config = read_yaml(config_path)
+            report_path = ensure_dir(_experiment_dir(config) / "export") / "export.report.json"
+            return _cancelled_result(config_path, stage="export", report_path=report_path)
         onnx_path = export_onnx(config_path)
         return AdapterResult("completed", onnx_path, {"onnx": str(onnx_path)})
 
-    def evaluate(self, config_path: str | Path, onnx_path: str | Path | None = None) -> AdapterResult:
+    def evaluate(
+        self,
+        config_path: str | Path,
+        onnx_path: str | Path | None = None,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> AdapterResult:
+        if should_cancel and should_cancel():
+            config = read_yaml(config_path)
+            report_path = ensure_dir(_experiment_dir(config) / "eval") / "eval.report.json"
+            return _cancelled_result(config_path, stage="evaluation", report_path=report_path)
         report_path = run_evaluation(config_path, onnx_path)
         return AdapterResult("completed", report_path, {"report": str(report_path)})
 

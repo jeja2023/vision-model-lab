@@ -1,4 +1,4 @@
-﻿# 生产交付验收
+# 生产交付验收
 
 ## 环境变量
 
@@ -121,3 +121,11 @@ python -m pip check
 - S3/MinIO、PostgreSQL、Alembic 均作为可选 extra 接入，默认安装保持轻量。
 - 任务日志、产物索引、数据集版本、模型注册、发布审批和灰度/回滚 API 均有回归测试覆盖。
 - 完整说明见 `docs/RELEASE_0.4.0.md`。
+## 0.4.1 发布门禁
+
+- Python 包版本、运行时 `__version__`、前端包版本和 lockfile 已统一为 `0.4.1`。
+- `python -m pytest` 当前为 39 passed，2 warnings。
+- `npm run build` 通过，构建产物版本为 `vision-model-lab-frontend@0.4.1`。
+- `python -m compileall -q src tests migrations` 通过。
+- 异步流水线取消、Alembic baseline、普通 SQLite 迁移路径、前端取消状态反馈均有回归测试或构建校验覆盖。
+- 完整说明见 `docs/RELEASE_0.4.1.md`。

@@ -78,27 +78,32 @@ export type AdapterInfo = {
   description: string;
 };
 
+export type PipelineRunReport = {
+  status: string;
+  config?: string;
+  training?: Record<string, unknown>;
+  export?: Record<string, unknown>;
+  evaluation?: {
+    metrics?: Record<string, number>;
+    [key: string]: unknown;
+  };
+  package?: {
+    artifact_name?: string;
+    validation?: PackageValidation;
+    [key: string]: unknown;
+  };
+  cancelled_stage?: string | null;
+  cancelled_reason?: string | null;
+  artifacts?: PipelineArtifact[];
+  [key: string]: unknown;
+};
+
 export type PipelineRunRecord = {
   id?: number;
   config_path?: string;
   status: string;
   created_at?: string;
-  report: {
-    status: string;
-    config?: string;
-    training?: Record<string, unknown>;
-    export?: Record<string, unknown>;
-    evaluation?: {
-      metrics?: Record<string, number>;
-      [key: string]: unknown;
-    };
-    package?: {
-      artifact_name?: string;
-      validation?: PackageValidation;
-      [key: string]: unknown;
-    };
-    [key: string]: unknown;
-  };
+  report: PipelineRunReport;
 };
 
 
@@ -134,7 +139,7 @@ export type PipelineJobRecord = {
     persist?: boolean;
     [key: string]: unknown;
   };
-  result?: PipelineRunRecord["report"] | null;
+  result?: PipelineRunReport | null;
   error?: string | null;
   created_at: string;
   started_at?: string | null;
