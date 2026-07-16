@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ def _write_synthetic_image(path: Path) -> None:
 
 PipelineEventSink = Callable[[str, str, dict[str, Any]], None]
 CancelCheck = Callable[[], bool]
+LogLineSink = Callable[[str, str], None]
 
 
 def _emit(event_sink: PipelineEventSink | None, stage: str, message: str, detail: dict[str, Any] | None = None) -> None:
@@ -53,6 +55,24 @@ def _cancelled_report(
         "config": str(config_path),
         "cancelled_stage": cancelled_stage,
         "cancelled_reason": reason,
+        **stage_payloads,
+    }
+    report["artifacts"] = collect_pipeline_artifacts(report)
+    return report
+
+
+def _failed_report(
+    config_path: str | Path,
+    stage_payloads: dict[str, dict[str, Any]],
+    *,
+    failed_stage: str,
+    reason: str,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "status": "failed",
+        "config": str(config_path),
+        "failed_stage": failed_stage,
+        "failed_reason": reason,
         **stage_payloads,
     }
     report["artifacts"] = collect_pipeline_artifacts(report)
@@ -111,6 +131,31 @@ def _record_stage_result(
     return payload
 
 
+def _run_stage_safely(
+    stage: str,
+    config_path: str | Path,
+    *,
+    onnx_path: str | Path | None = None,
+    should_cancel: CancelCheck | None = None,
+    log_sink: LogLineSink | None = None,
+) -> Any:
+    """阶段级异常兜底：任何适配器异常转成结构化 failed 载荷，保留已完成阶段的结果。"""
+    from vision_model_lab.adapters.base import AdapterResult
+
+    try:
+        return run_stage(stage, config_path, onnx_path=onnx_path, should_cancel=should_cancel, log_sink=log_sink)
+    except Exception as exc:  # noqa: BLE001
+        return AdapterResult(
+            status="failed",
+            path=Path(str(config_path)),
+            payload={
+                "error": str(exc),
+                "traceback": traceback.format_exc(limit=10),
+                "message": f"Stage {stage} raised an unhandled exception.",
+            },
+        )
+
+
 def run_experiment_pipeline(
     config_path: str | Path,
     *,
@@ -118,6 +163,7 @@ def run_experiment_pipeline(
     output_root: str | Path = "shared-models",
     event_sink: PipelineEventSink | None = None,
     should_cancel: CancelCheck | None = None,
+    log_sink: LogLineSink | None = None,
 ) -> dict[str, Any]:
     stage_payloads: dict[str, dict[str, Any]] = {}
 
@@ -126,7 +172,7 @@ def run_experiment_pipeline(
         return _cancelled_report(config_path, stage_payloads, cancelled_stage="training", reason="Cancellation requested before training started")
 
     _emit(event_sink, "training", "started", {"config_path": str(config_path)})
-    train_result = run_stage("training", config_path, should_cancel=should_cancel)
+    train_result = _run_stage_safely("training", config_path, should_cancel=should_cancel, log_sink=log_sink)
     train_payload = _record_stage_result(stage_payloads, "training", train_result, event_sink)
     if train_payload.get("status") == "cancelled":
         return _cancelled_report(
@@ -135,11 +181,19 @@ def run_experiment_pipeline(
             cancelled_stage="training",
             reason=str(train_payload.get("message") or "Training was cancelled"),
         )
+    if train_payload.get("status") == "failed":
+        # 训练失败必须短路：继续导出只会产出无训练权重的废品并被打上合格标签。
+        return _failed_report(
+            config_path,
+            stage_payloads,
+            failed_stage="training",
+            reason=str(train_payload.get("message") or train_payload.get("error") or "Training failed"),
+        )
     if _cancel_requested(should_cancel):
         return _cancelled_report(config_path, stage_payloads, cancelled_stage="training", reason="Cancellation requested after training")
 
     _emit(event_sink, "export", "started", {"config_path": str(config_path)})
-    export_result = run_stage("export", config_path, should_cancel=should_cancel)
+    export_result = _run_stage_safely("export", config_path, should_cancel=should_cancel, log_sink=log_sink)
     export_payload = _record_stage_result(stage_payloads, "export", export_result, event_sink)
     if export_payload.get("status") == "cancelled":
         return _cancelled_report(
@@ -148,12 +202,19 @@ def run_experiment_pipeline(
             cancelled_stage="export",
             reason=str(export_payload.get("message") or "Export was cancelled"),
         )
+    if export_payload.get("status") == "failed":
+        return _failed_report(
+            config_path,
+            stage_payloads,
+            failed_stage="export",
+            reason=str(export_payload.get("message") or export_payload.get("error") or "Export failed"),
+        )
     if _cancel_requested(should_cancel):
         return _cancelled_report(config_path, stage_payloads, cancelled_stage="export", reason="Cancellation requested after export")
 
     onnx_path = export_result.payload.get("onnx") or export_result.path
     _emit(event_sink, "evaluation", "started", {"onnx_path": str(onnx_path)})
-    eval_result = run_stage("evaluation", config_path, onnx_path=onnx_path, should_cancel=should_cancel)
+    eval_result = _run_stage_safely("evaluation", config_path, onnx_path=onnx_path, should_cancel=should_cancel, log_sink=log_sink)
     eval_payload = _record_stage_result(stage_payloads, "evaluation", eval_result, event_sink)
     if eval_payload.get("status") == "cancelled":
         return _cancelled_report(
@@ -161,6 +222,13 @@ def run_experiment_pipeline(
             stage_payloads,
             cancelled_stage="evaluation",
             reason=str(eval_payload.get("message") or "Evaluation was cancelled"),
+        )
+    if eval_payload.get("status") == "failed":
+        return _failed_report(
+            config_path,
+            stage_payloads,
+            failed_stage="evaluation",
+            reason=str(eval_payload.get("message") or eval_payload.get("error") or "Evaluation failed"),
         )
 
     result: dict[str, Any] = {
@@ -171,8 +239,25 @@ def run_experiment_pipeline(
     if package:
         if _cancel_requested(should_cancel):
             return _cancelled_report(config_path, stage_payloads, cancelled_stage="package", reason="Cancellation requested before package creation")
+        # 打包前强制校验全流水线状态：任何非 completed 状态都不允许产出交付物。
+        if result["status"] != "completed":
+            return _failed_report(
+                config_path,
+                stage_payloads,
+                failed_stage="package",
+                reason=f"Refusing to package a pipeline whose status is {result['status']!r}",
+            )
         _emit(event_sink, "package", "started", {"output_root": str(output_root)})
-        result["package"] = create_package_from_experiment(config_path, onnx_path=onnx_path, output_root=output_root)
+        try:
+            result["package"] = create_package_from_experiment(config_path, onnx_path=onnx_path, output_root=output_root)
+        except Exception as exc:  # noqa: BLE001
+            stage_payloads["package"] = {
+                "status": "failed",
+                "error": str(exc),
+                "traceback": traceback.format_exc(limit=10),
+            }
+            _emit(event_sink, "package", "failed", stage_payloads["package"])
+            return _failed_report(config_path, stage_payloads, failed_stage="package", reason=str(exc))
         _emit(event_sink, "package", "completed", result["package"])
     result["artifacts"] = collect_pipeline_artifacts(result)
     return result
@@ -215,6 +300,8 @@ def create_package_from_experiment(
     config = read_yaml(config_path)
     if onnx_path is None:
         export_result = run_stage("export", config_path)
+        if export_result.status != "completed":
+            raise RuntimeError(f"Export stage did not complete (status={export_result.status}); refusing to package.")
         onnx_path = export_result.payload.get("onnx") or export_result.path
     onnx_path = Path(onnx_path)
     artifact_name = onnx_path.name

@@ -124,9 +124,29 @@ def _cmd_validate_contract(args: argparse.Namespace) -> int:
 
 def _cmd_storage_migrate(args: argparse.Namespace) -> int:
     settings = load_settings()
-    store = metadata_store_from_uri(args.uri or settings.metadata_db)
+    uri = args.uri or settings.metadata_db
+    # Alembic 可用时优先走正式迁移链（schema 单一权威）；否则回落到内置建表。
+    migrated_via = "builtin"
+    if uri != ":memory:":
+        try:
+            import alembic.command
+            import alembic.config
+
+            root = Path(__file__).resolve().parents[2]
+            ini_path = root / "alembic.ini"
+            if ini_path.exists():
+                import os as _os
+
+                _os.environ["VMLAB_METADATA_DB"] = uri
+                config = alembic.config.Config(str(ini_path))
+                config.set_main_option("script_location", str(root / "migrations"))
+                alembic.command.upgrade(config, "head")
+                migrated_via = "alembic"
+        except ImportError:
+            pass
+    store = metadata_store_from_uri(uri)
     store.initialize()
-    _print_json({"ok": True, "metadata_db": args.uri or settings.metadata_db})
+    _print_json({"ok": True, "metadata_db": uri, "migrated_via": migrated_via})
     return 0
 
 

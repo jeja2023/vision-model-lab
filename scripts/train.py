@@ -16,7 +16,7 @@ def main() -> int:
     args = parser.parse_args()
     result = run_stage("training", args.config)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
-    return 0 if result.status in {"completed", "external_command_declared"} else 3
+    return 0 if result.status == "completed" else 3
 
 
 if __name__ == "__main__":

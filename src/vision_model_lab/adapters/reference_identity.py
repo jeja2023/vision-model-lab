@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from vision_model_lab.export.onnx_checks import check_onnx_loadable
-from vision_model_lab.adapters.base import AdapterResult
+from vision_model_lab.adapters.base import AdapterResult, LogLineSink
 from vision_model_lab.utils import ensure_dir, read_yaml, write_json
 
 
 def _experiment_dir(config: dict[str, Any], root: str | Path = "experiments/local_runs") -> Path:
     experiment = config.get("experiment", {})
     experiment_id = experiment.get("id", "reference_identity")
-    return ensure_dir(Path(root) / str(experiment_id))
+    workspace = Path(os.environ.get("VMLAB_WORKSPACE", Path.cwd())).resolve()
+    return ensure_dir(workspace / root / str(experiment_id))
 
 
 def _cancelled_result(config_path: str | Path, *, stage: str, report_path: Path) -> AdapterResult:
@@ -100,6 +102,7 @@ class ReferenceIdentityAdapter:
         config_path: str | Path,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         if should_cancel and should_cancel():
             config = read_yaml(config_path)
@@ -112,6 +115,7 @@ class ReferenceIdentityAdapter:
         config_path: str | Path,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         if should_cancel and should_cancel():
             config = read_yaml(config_path)
@@ -126,6 +130,7 @@ class ReferenceIdentityAdapter:
         onnx_path: str | Path | None = None,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         if should_cancel and should_cancel():
             config = read_yaml(config_path)

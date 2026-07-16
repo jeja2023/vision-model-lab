@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,15 +25,54 @@ from vision_model_lab.storage import metadata_store_from_uri
 from vision_model_lab.utils import read_yaml
 
 
+logger = logging.getLogger("vision_model_lab.api")
+
 SETTINGS = load_settings()
 WORKSPACE_ROOT = SETTINGS.workspace_root
 STORE = metadata_store_from_uri(SETTINGS.metadata_db)
 EXECUTOR = ThreadPoolExecutor(max_workers=SETTINGS.pipeline_workers, thread_name_prefix="vmlab-pipeline")
 
+# 同步执行超长流水线会阻塞 HTTP worker；超过该时长的配置应使用 async 模式。
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def _recover_jobs_on_startup() -> None:
+    """服务重启后回收孤儿任务：进程内队列不会幸存，DB 状态必须收敛。"""
+    try:
+        orphans = STORE.recover_orphaned_jobs()
+        for job in orphans:
+            STORE.record_pipeline_job_log(int(job["id"]), "job", "orphaned by service restart")
+            STORE.record_audit_event(
+                actor="system",
+                action="pipeline.job.orphaned",
+                target=str(job["id"]),
+                detail={"config_path": job.get("config_path", "")},
+            )
+        queued = STORE.list_queued_pipeline_jobs()
+        for job in queued:
+            EXECUTOR.submit(_run_pipeline_job, int(job["id"]), job.get("request") or {})
+        if orphans or queued:
+            logger.warning(
+                "pipeline reconcile on startup: %d orphaned job(s) failed, %d queued job(s) resubmitted",
+                len(orphans),
+                len(queued),
+            )
+    except Exception:  # noqa: BLE001 - 启动恢复失败不应阻止服务可用
+        logger.exception("pipeline job reconcile failed on startup")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    _recover_jobs_on_startup()
+    yield
+    EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
 app = FastAPI(
     title="Vision Model Lab",
     version=__version__,
     description="Management API for vision model research artifacts, dataset manifests, experiments, and delivery packages.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -214,6 +255,10 @@ def _run_pipeline_job(job_id: int, payload: dict[str, Any]) -> None:
     def event_sink(stage: str, message: str, detail: dict[str, Any]) -> None:
         STORE.record_pipeline_job_log(job_id, stage, message, detail)
 
+    def log_sink(stream: str, line: str) -> None:
+        # 外部命令 stdout/stderr 逐行入库，训练期间即可实时查看进度。
+        STORE.record_pipeline_job_log(job_id, stream, line)
+
     def should_cancel() -> bool:
         try:
             return STORE.get_pipeline_job(job_id)["status"] == "cancellation_requested"
@@ -225,6 +270,10 @@ def _run_pipeline_job(job_id: int, payload: dict[str, Any]) -> None:
         if job["status"] == "cancelled":
             STORE.record_pipeline_job_log(job_id, "job", "cancelled before start")
             return
+        if job["status"] != "running":
+            # 状态守卫未命中（已被其他 worker 认领或已完结），放弃本次执行。
+            STORE.record_pipeline_job_log(job_id, "job", f"skipped: job is already {job['status']}")
+            return
         STORE.record_pipeline_job_log(job_id, "job", "started", {"config_path": payload["config_path"]})
         report = run_experiment_pipeline(
             payload["config_path"],
@@ -232,6 +281,7 @@ def _run_pipeline_job(job_id: int, payload: dict[str, Any]) -> None:
             output_root=payload.get("output_root", "shared-models"),
             event_sink=event_sink,
             should_cancel=should_cancel,
+            log_sink=log_sink,
         )
         run_record = STORE.record_pipeline_run(payload["config_path"], report) if payload.get("persist", True) else None
         _record_pipeline_artifacts(report, job_id=job_id, run_id=int(run_record["id"]) if run_record else None)
@@ -263,6 +313,12 @@ def _run_pipeline_job(job_id: int, payload: dict[str, Any]) -> None:
         STORE.record_audit_event(actor="api", action="pipeline.job.failed", target=str(job_id), detail={"error": str(exc)})
 
 def _queue_pipeline_job(payload: dict[str, Any]) -> dict[str, Any]:
+    # 同一配置的并发运行共享输出目录，会互相覆盖产物，必须拒绝。
+    if STORE.has_active_pipeline_job(payload["config_path"]):
+        raise HTTPException(
+            status_code=409,
+            detail=f"An active pipeline job already exists for {payload['config_path']}; wait for it to finish or cancel it first.",
+        )
     job = STORE.create_pipeline_job(payload["config_path"], payload)
     EXECUTOR.submit(_run_pipeline_job, int(job["id"]), payload)
     STORE.record_audit_event(
@@ -281,6 +337,7 @@ def health() -> dict[str, Any]:
         "version": __version__,
         "workspace": str(WORKSPACE_ROOT),
         "metadata_db": SETTINGS.metadata_db,
+        "metadata_persistent": SETTINGS.metadata_db != ":memory:",
         "serve_frontend": SETTINGS.serve_frontend and SETTINGS.frontend_dist.exists(),
         "storage_backend": SETTINGS.storage_backend,
         "storage_uri": SETTINGS.storage_uri,
@@ -428,12 +485,17 @@ def get_pipeline_job(job_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/pipelines/jobs/{job_id}/logs")
-def list_pipeline_job_logs(job_id: int, limit: int = Query(default=200, ge=1, le=1000)) -> dict[str, Any]:
+def list_pipeline_job_logs(
+    job_id: int,
+    limit: int = Query(default=200, ge=1, le=1000),
+    since_id: int | None = Query(default=None, ge=0),
+    tail: bool = Query(default=False),
+) -> dict[str, Any]:
     try:
         STORE.get_pipeline_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Pipeline job not found") from exc
-    return {"logs": STORE.list_pipeline_job_logs(job_id, limit)}
+    return {"logs": STORE.list_pipeline_job_logs(job_id, limit, since_id=since_id, tail=tail)}
 
 
 @app.get("/api/pipelines/jobs/{job_id}/artifacts")
@@ -461,7 +523,28 @@ def retry_pipeline_job(job_id: int) -> dict[str, Any]:
         job = STORE.get_pipeline_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Pipeline job not found") from exc
+    # 只允许重试已完结的任务：对 running 任务重放会产生并发重复执行互相覆盖产物。
+    if job["status"] not in TERMINAL_JOB_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job {job_id} is {job['status']}; only completed/failed/cancelled jobs can be retried.",
+        )
     return {"job": _queue_pipeline_job(job["request"])}
+
+
+@app.get("/api/pipelines/artifacts/{artifact_id}/download")
+def download_pipeline_artifact(artifact_id: int) -> FileResponse:
+    try:
+        artifact = STORE.get_pipeline_artifact(artifact_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Artifact not found") from exc
+    raw_path = artifact.get("path")
+    if not raw_path:
+        raise HTTPException(status_code=404, detail="Artifact has no local file path")
+    resolved = workspace_path(raw_path)
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file no longer exists")
+    return FileResponse(resolved, filename=resolved.name, media_type="application/octet-stream")
 
 
 @app.post("/api/packages/create", dependencies=[Depends(require_auth)])

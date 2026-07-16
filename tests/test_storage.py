@@ -110,3 +110,125 @@ def test_alembic_upgrade_supports_plain_sqlite_path_and_creates_base_tables(work
         "release_approvals",
         "deployment_rollouts",
     } <= tables
+
+
+def test_terminal_job_status_cannot_be_reverted_by_cancel() -> None:
+    """回归：completed/failed/cancelled 终态不得被取消请求回退。"""
+    store = MetadataStore(":memory:")
+
+    job = store.create_pipeline_job("configs/experiments/example.yml", {"package": False})
+    store.mark_pipeline_job_running(int(job["id"]))
+    store.complete_pipeline_job(int(job["id"]), {"status": "completed"})
+
+    after_cancel = store.request_pipeline_job_cancel(int(job["id"]))
+
+    assert after_cancel["status"] == "completed"
+    assert after_cancel["cancelled_at"] is None
+
+
+def test_complete_does_not_overwrite_cancelled_job() -> None:
+    """回归：已取消任务不得被迟到的 complete 覆盖为 completed。"""
+    store = MetadataStore(":memory:")
+
+    job = store.create_pipeline_job("configs/experiments/example.yml", {"package": False})
+    cancelled = store.request_pipeline_job_cancel(int(job["id"]))
+    assert cancelled["status"] == "cancelled"
+
+    after_complete = store.complete_pipeline_job(int(job["id"]), {"status": "completed"})
+
+    assert after_complete["status"] == "cancelled"
+
+
+def test_cancel_running_job_requests_cancellation() -> None:
+    store = MetadataStore(":memory:")
+
+    job = store.create_pipeline_job("configs/experiments/example.yml", {"package": False})
+    store.mark_pipeline_job_running(int(job["id"]))
+    cancelled = store.request_pipeline_job_cancel(int(job["id"]))
+
+    assert cancelled["status"] == "cancellation_requested"
+
+
+def test_recover_orphaned_jobs_marks_running_as_failed() -> None:
+    """回归：服务重启后 running/cancellation_requested 任务必须被回收为 failed。"""
+    store = MetadataStore(":memory:")
+
+    running_job = store.create_pipeline_job("configs/experiments/a.yml", {})
+    store.mark_pipeline_job_running(int(running_job["id"]))
+    queued_job = store.create_pipeline_job("configs/experiments/b.yml", {})
+
+    orphans = store.recover_orphaned_jobs()
+
+    assert [job["id"] for job in orphans] == [running_job["id"]]
+    assert store.get_pipeline_job(int(running_job["id"]))["status"] == "failed"
+    assert store.get_pipeline_job(int(queued_job["id"]))["status"] == "queued"
+    assert [job["id"] for job in store.list_queued_pipeline_jobs()] == [queued_job["id"]]
+
+
+def test_pipeline_job_logs_since_id_and_tail() -> None:
+    """回归：日志支持 since_id 增量拉取与 tail 取尾。"""
+    store = MetadataStore(":memory:")
+
+    job = store.create_pipeline_job("configs/experiments/example.yml", {})
+    ids = [int(store.record_pipeline_job_log(int(job["id"]), "stdout", f"line {i}")["id"]) for i in range(10)]
+
+    incremental = store.list_pipeline_job_logs(int(job["id"]), since_id=ids[6])
+    assert [log["id"] for log in incremental] == ids[7:]
+
+    tail = store.list_pipeline_job_logs(int(job["id"]), limit=3, tail=True)
+    assert [log["id"] for log in tail] == ids[-3:]
+
+
+def test_timestamps_are_timezone_annotated_iso8601() -> None:
+    """回归：时间戳必须是带 Z 后缀的 ISO8601，浏览器解析不产生时区偏移。"""
+    store = MetadataStore(":memory:")
+
+    job = store.create_pipeline_job("configs/experiments/example.yml", {})
+    running = store.mark_pipeline_job_running(int(job["id"]))
+
+    assert "T" in job["created_at"] and job["created_at"].endswith("Z")
+    assert running["started_at"] is not None and running["started_at"].endswith("Z")
+
+
+def test_has_active_pipeline_job_detects_concurrent_config() -> None:
+    store = MetadataStore(":memory:")
+
+    store.create_pipeline_job("configs/experiments/example.yml", {})
+
+    assert store.has_active_pipeline_job("configs/experiments/example.yml") is True
+    assert store.has_active_pipeline_job("configs/experiments/other.yml") is False
+
+
+def test_reset_preserves_nonempty_wal_file(workspace_tmp_path: Path) -> None:
+    """回归：主库 0 字节但 WAL 非空时 reset 不得删除（已提交数据可能全在 WAL 中）。"""
+    database = workspace_tmp_path / "wal_guard.sqlite3"
+    database.write_bytes(b"")
+    wal_file = Path(str(database) + "-wal")
+    wal_file.write_bytes(b"fake-wal-with-committed-data")
+
+    # 直接验证 reset 守卫本身：WAL 非空时必须拒绝清理（返回 False 且不删文件）。
+    store = MetadataStore.__new__(MetadataStore)
+    store.path = database
+    store._lock = __import__("threading").RLock()
+
+    assert store._reset_empty_database_files() is False
+    assert wal_file.exists(), "non-empty WAL must never be deleted by the reset logic"
+
+
+def test_prepare_sql_handles_prefix_parameter_names_and_literal_question_marks() -> None:
+    """回归：PG SQL 改写必须按词边界替换命名参数，前缀参数名不得互相破坏。"""
+    from vision_model_lab.storage import _PostgresConnectionAdapter
+
+    adapter = _PostgresConnectionAdapter.__new__(_PostgresConnectionAdapter)
+
+    prepared = adapter._prepare_sql(
+        "UPDATE t SET task=:task, task_id=:task_id WHERE id=:id",
+        {"task": "a", "task_id": 1, "id": 2},
+    )
+    assert prepared == "UPDATE t SET task=%(task)s, task_id=%(task_id)s WHERE id=%(id)s"
+
+    inserted = adapter._prepare_sql("INSERT INTO audit_events (actor) VALUES (?)", ("x",))
+    assert inserted.rstrip().endswith("RETURNING id")
+
+    non_returning = adapter._prepare_sql("INSERT INTO unknown_table (a) VALUES (?)", ("x",))
+    assert "RETURNING" not in non_returning

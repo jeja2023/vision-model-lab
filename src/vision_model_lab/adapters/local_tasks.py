@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,10 +16,19 @@ from vision_model_lab.export.onnx_checks import check_onnx_loadable
 from vision_model_lab.utils import ensure_dir, read_yaml, write_json
 
 
+LogLineSink = Callable[[str, str], None]
+"""外部命令逐行日志回调：(stream, line)。"""
+
+
+def _workspace_root() -> Path:
+    return Path(os.environ.get("VMLAB_WORKSPACE", Path.cwd())).resolve()
+
+
 def _experiment_dir(config: dict[str, Any], root: str | Path = "experiments/local_runs") -> Path:
     experiment = config.get("experiment", {})
     experiment_id = experiment.get("id") or f"{experiment.get('task', 'task')}_local"
-    return ensure_dir(Path(root) / str(experiment_id))
+    # 产物目录统一锚定 workspace，避免服务进程 CWD 与 workspace 不一致时产物"失联"。
+    return ensure_dir(_workspace_root() / root / str(experiment_id))
 
 
 def _artifact_name(config: dict[str, Any], task: str, architecture: str) -> str:
@@ -78,19 +89,16 @@ def _int_env(name: str, default: int, *, minimum: int = 1) -> int:
     return max(parsed, minimum)
 
 
-def _truncate_log(value: str | bytes | None, limit: int) -> str:
+def _truncate_log(value: str | None, limit: int) -> str:
+    """截断日志时保留头部与尾部——失败排障最需要的 Traceback 在尾部。"""
     if value is None:
         return ""
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="replace")
     value = value.strip()
     if len(value) <= limit:
         return value
-    return value[:limit] + "\n...[truncated]"
-
-
-def _workspace_root() -> Path:
-    return Path(os.environ.get("VMLAB_WORKSPACE", Path.cwd())).resolve()
+    head = max(limit // 5, 1)
+    tail = limit - head
+    return value[:head] + "\n...[中间日志已截断]...\n" + value[-tail:]
 
 
 def _resolve_command_cwd(cwd: str | Path) -> Path:
@@ -102,6 +110,100 @@ def _resolve_command_cwd(cwd: str | Path) -> Path:
     if resolved != root and root not in resolved.parents:
         raise ValueError(f"External command cwd escapes workspace: {cwd}")
     return resolved
+
+
+def _command_env() -> dict[str, str]:
+    """外部命令环境：剥离平台自身机密，避免任意 argv 命令读取服务端凭证。"""
+    blocked = {
+        "VMLAB_AUTH_TOKEN",
+        "VMLAB_S3_ACCESS_KEY_ID",
+        "VMLAB_S3_SECRET_ACCESS_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    }
+    return {key: value for key, value in os.environ.items() if key not in blocked}
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """终止整棵进程树：真实训练命令普遍多进程（DataLoader worker、torchrun 等）。"""
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            # Windows 下 taskkill /T 递归终止整棵子进程树。
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+        else:
+            # POSIX 下配合 start_new_session=True 对整个进程组发信号。
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                process.terminate()
+    except Exception:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name != "nt":
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            else:
+                process.kill()
+        except Exception:
+            process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+class _StreamCollector:
+    """后台线程逐行消费子进程输出，避免 PIPE 缓冲区写满导致的管道死锁。"""
+
+    def __init__(self, stream: Any, name: str, limit: int, on_line: LogLineSink | None) -> None:
+        self.name = name
+        self._limit = limit
+        self._on_line = on_line
+        self._chunks: list[str] = []
+        self._size = 0
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._pump, args=(stream,), daemon=True)
+        self._thread.start()
+
+    def _pump(self, stream: Any) -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                with self._lock:
+                    # 内存中最多保留 4 倍截断上限，避免超长输出撑爆内存。
+                    if self._size < self._limit * 4:
+                        self._chunks.append(line)
+                        self._size += len(line)
+                if self._on_line is not None:
+                    stripped = line.rstrip("\r\n")
+                    if stripped:
+                        try:
+                            self._on_line(self.name, stripped)
+                        except Exception:
+                            pass
+        except (ValueError, OSError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def join(self, timeout: float = 5.0) -> None:
+        self._thread.join(timeout)
+
+    def text(self) -> str:
+        with self._lock:
+            return "".join(self._chunks)
 
 
 def _cancelled_result(report_path: Path, *, adapter: str, stage: str, config_path: str | Path, message: str) -> AdapterResult:
@@ -124,6 +226,7 @@ def _run_external_command(
     cwd: str | Path = ".",
     stage: str,
     should_cancel: Callable[[], bool] | None = None,
+    log_sink: LogLineSink | None = None,
 ) -> dict[str, Any]:
     timeout = _int_env("VMLAB_EXTERNAL_COMMAND_TIMEOUT_SECONDS", 3600)
     log_limit = _int_env("VMLAB_EXTERNAL_COMMAND_LOG_MAX_CHARS", 20000)
@@ -171,60 +274,69 @@ def _run_external_command(
             "error_code": "external.cancelled",
         }
 
+    popen_kwargs: dict[str, Any] = {}
+    if os.name != "nt":
+        # 独立会话使整个进程组可以被一起终止。
+        popen_kwargs["start_new_session"] = True
+    else:
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
     try:
         process = subprocess.Popen(
             run_command,
             cwd=resolved_cwd,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=_command_env(),
             shell=shell,
+            **popen_kwargs,
         )
     except OSError as exc:
         return {"command": rendered, "returncode": None, "stdout": "", "stderr": str(exc), "ok": False, "error_code": "external.spawn_failed"}
 
+    stdout_collector = _StreamCollector(process.stdout, "stdout", log_limit, log_sink)
+    stderr_collector = _StreamCollector(process.stderr, "stderr", log_limit, log_sink)
+
+    def _finalize(*, returncode: int | None, ok: bool, cancelled: bool = False, error_code: str | None = None, fallback_stderr: str = "") -> dict[str, Any]:
+        stdout_collector.join()
+        stderr_collector.join()
+        result: dict[str, Any] = {
+            "command": rendered,
+            "returncode": returncode,
+            "stdout": _truncate_log(stdout_collector.text(), log_limit),
+            "stderr": _truncate_log(stderr_collector.text(), log_limit) or fallback_stderr,
+            "ok": ok,
+        }
+        if cancelled:
+            result["cancelled"] = True
+        if error_code:
+            result["error_code"] = error_code
+        return result
+
     deadline = time.monotonic() + timeout
     while True:
         if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            return {
-                "command": rendered,
-                "returncode": process.returncode,
-                "stdout": _truncate_log(stdout, log_limit),
-                "stderr": _truncate_log(stderr, log_limit),
-                "ok": process.returncode == 0,
-            }
+            return _finalize(returncode=process.returncode, ok=process.returncode == 0)
         if should_cancel and should_cancel():
-            process.terminate()
-            try:
-                stdout, stderr = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate()
-            return {
-                "command": rendered,
-                "returncode": None,
-                "stdout": _truncate_log(stdout, log_limit),
-                "stderr": _truncate_log(stderr, log_limit) or f"Command cancelled during {stage}",
-                "ok": False,
-                "cancelled": True,
-                "error_code": "external.cancelled",
-            }
+            _terminate_process_tree(process)
+            return _finalize(
+                returncode=None,
+                ok=False,
+                cancelled=True,
+                error_code="external.cancelled",
+                fallback_stderr=f"Command cancelled during {stage}",
+            )
         if time.monotonic() >= deadline:
-            process.terminate()
-            try:
-                stdout, stderr = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate()
-            return {
-                "command": rendered,
-                "returncode": None,
-                "stdout": _truncate_log(stdout, log_limit),
-                "stderr": _truncate_log(stderr, log_limit) or f"Command timed out after {timeout} seconds",
-                "ok": False,
-                "error_code": "external.timeout",
-            }
+            _terminate_process_tree(process)
+            return _finalize(
+                returncode=None,
+                ok=False,
+                error_code="external.timeout",
+                fallback_stderr=f"Command timed out after {timeout} seconds",
+            )
         time.sleep(0.1)
 
 
@@ -245,6 +357,35 @@ def _resolve_workspace_file(path: str | Path) -> Path:
     return resolved
 
 
+def _read_produced_metrics(evaluation_config: dict[str, Any]) -> tuple[dict[str, float] | None, str | None]:
+    """回读外部评估命令产出的真实指标文件；返回 (metrics, error)。"""
+    produced = evaluation_config.get("produced_metrics") or evaluation_config.get("metrics_file")
+    if not produced:
+        return None, None
+    try:
+        metrics_path = _resolve_workspace_file(str(produced))
+    except ValueError as exc:
+        return None, str(exc)
+    if not metrics_path.exists():
+        return None, f"produced_metrics file not found: {metrics_path}"
+    try:
+        with metrics_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, f"produced_metrics is not valid JSON: {exc}"
+    if isinstance(data, dict) and isinstance(data.get("metrics"), dict):
+        data = data["metrics"]
+    if not isinstance(data, dict):
+        return None, "produced_metrics JSON root must be an object"
+    metrics: dict[str, float] = {}
+    for key, value in data.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            metrics[str(key)] = float(value)
+    if not metrics:
+        return None, "produced_metrics contained no numeric metrics"
+    return metrics, None
+
+
 @dataclass(frozen=True)
 class LocalTaskAdapter:
     name: str
@@ -260,6 +401,7 @@ class LocalTaskAdapter:
         config_path: str | Path,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         config = read_yaml(config_path)
         output_dir = _experiment_dir(config)
@@ -271,7 +413,13 @@ class LocalTaskAdapter:
         message = "Local baseline recorded a reproducible run; replace training.command for framework training."
         external_result: dict[str, Any] | None = None
         if external_command := training.get("command") if isinstance(training, dict) else None:
-            external_result = _run_external_command(external_command, cwd=_command_cwd(training), stage="training", should_cancel=should_cancel)
+            external_result = _run_external_command(
+                external_command,
+                cwd=_command_cwd(training),
+                stage="training",
+                should_cancel=should_cancel,
+                log_sink=log_sink,
+            )
             if external_result.get("cancelled"):
                 status = "cancelled"
                 message = "External training command was cancelled."
@@ -305,6 +453,7 @@ class LocalTaskAdapter:
         config_path: str | Path,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         config = read_yaml(config_path)
         architecture = str(config.get("model", {}).get("architecture", self.task))
@@ -314,30 +463,50 @@ class LocalTaskAdapter:
         report_path = output_dir / "export.report.json"
         if should_cancel and should_cancel():
             return _cancelled_result(report_path, adapter=self.name, stage="export", config_path=config_path, message="Export cancelled before execution.")
-        if output_path.exists():
+
+        export_config = config.get("export", {}) if isinstance(config.get("export"), dict) else {}
+        external_command = export_config.get("command")
+        reuse_existing = bool(export_config.get("reuse_existing", False))
+        external_result: dict[str, Any] | None = None
+
+        # 只有显式声明 reuse_existing 时才复用已有 ONNX，避免改配置重跑后静默交付旧模型。
+        if reuse_existing and not external_command and output_path.exists():
             try:
                 check = check_onnx_loadable(output_path)
-                if should_cancel and should_cancel():
-                    return _cancelled_result(report_path, adapter=self.name, stage="export", config_path=config_path, message="Export cancelled before report finalization.")
+            except Exception as exc:
                 report = {
-                    "status": "completed",
+                    "status": "failed",
                     "adapter": self.name,
                     "task": self.task,
                     "onnx": str(output_path),
-                    "check": check,
-                    "output_format": self.output_format,
-                    "labels": config.get("labels", self.default_labels),
-                    "message": "Reused existing loadable ONNX artifact.",
+                    "message": f"Existing ONNX artifact is not loadable and reuse_existing is set: {exc}",
                 }
                 write_json(report_path, report)
-                return AdapterResult(status="completed", path=output_path, payload={"onnx": str(output_path), "report": str(report_path)})
-            except Exception:
-                pass
-        export_config = config.get("export", {})
-        external_command = export_config.get("command") if isinstance(export_config, dict) else None
-        external_result: dict[str, Any] | None = None
+                return AdapterResult("failed", report_path, {"report": str(report_path)})
+            if should_cancel and should_cancel():
+                return _cancelled_result(report_path, adapter=self.name, stage="export", config_path=config_path, message="Export cancelled before report finalization.")
+            report = {
+                "status": "completed",
+                "adapter": self.name,
+                "task": self.task,
+                "onnx": str(output_path),
+                "check": check,
+                "output_format": self.output_format,
+                "labels": config.get("labels", self.default_labels),
+                "onnx_source": "reused",
+                "message": "Reused existing loadable ONNX artifact (export.reuse_existing=true).",
+            }
+            write_json(report_path, report)
+            return AdapterResult(status="completed", path=output_path, payload={"onnx": str(output_path), "report": str(report_path)})
+
         if external_command:
-            external_result = _run_external_command(external_command, cwd=_command_cwd(export_config), stage="export", should_cancel=should_cancel)
+            external_result = _run_external_command(
+                external_command,
+                cwd=_command_cwd(export_config),
+                stage="export",
+                should_cancel=should_cancel,
+                log_sink=log_sink,
+            )
             if external_result.get("cancelled"):
                 report = {
                     "status": "cancelled",
@@ -368,7 +537,18 @@ class LocalTaskAdapter:
                     report = {"status": "failed", "adapter": self.name, "task": self.task, "message": str(exc), "external": external_result}
                     write_json(report_path, report)
                     return AdapterResult("failed", report_path, {"report": str(report_path), "external": external_result})
-                if produced_path.exists() and produced_path != output_path:
+                if not produced_path.exists():
+                    report = {
+                        "status": "failed",
+                        "adapter": self.name,
+                        "task": self.task,
+                        "onnx": str(output_path),
+                        "message": f"export.command completed but produced_onnx was not found: {produced_path}",
+                        "external": external_result,
+                    }
+                    write_json(report_path, report)
+                    return AdapterResult("failed", report_path, {"report": str(report_path), "external": external_result})
+                if produced_path != output_path:
                     output_path.write_bytes(produced_path.read_bytes())
             elif not output_path.exists():
                 report = {
@@ -381,7 +561,43 @@ class LocalTaskAdapter:
                 }
                 write_json(report_path, report)
                 return AdapterResult("failed", report_path, {"report": str(report_path), "external": external_result})
-        model_input = config.get("model", {}).get("input_size") or config.get("export", {}).get("input", {}).get("shape")
+
+            # 关键修复：外部命令产出的真实 ONNX 直接校验并返回，绝不落入合成桩模型覆盖。
+            try:
+                check = check_onnx_loadable(output_path)
+            except Exception as exc:
+                report = {
+                    "status": "failed",
+                    "adapter": self.name,
+                    "task": self.task,
+                    "onnx": str(output_path),
+                    "external": external_result,
+                    "message": f"External export produced an ONNX file that failed validation: {exc}",
+                }
+                write_json(report_path, report)
+                return AdapterResult("failed", report_path, {"report": str(report_path), "external": external_result})
+            if should_cancel and should_cancel():
+                return _cancelled_result(report_path, adapter=self.name, stage="export", config_path=config_path, message="Export cancelled before report finalization.")
+            report = {
+                "status": "completed",
+                "adapter": self.name,
+                "task": self.task,
+                "onnx": str(output_path),
+                "check": check,
+                "output_format": self.output_format,
+                "labels": config.get("labels", self.default_labels),
+                "onnx_source": "external_command",
+                "external": external_result,
+            }
+            write_json(report_path, report)
+            return AdapterResult(
+                status="completed",
+                path=output_path,
+                payload={"onnx": str(output_path), "report": str(report_path), "external": external_result},
+            )
+
+        # 无外部命令：生成合成基线模型（仅作为 baseline 兜底，报告中明确标注来源）。
+        model_input = config.get("model", {}).get("input_size") or export_config.get("input", {}).get("shape")
         input_shape = [1, 1] if self.task == "reid" else [1, 3, 640, 640]
         if isinstance(model_input, list) and len(model_input) == 2:
             input_shape = [1, 3, int(model_input[0]), int(model_input[1])]
@@ -396,7 +612,6 @@ class LocalTaskAdapter:
         if should_cancel and should_cancel():
             return _cancelled_result(report_path, adapter=self.name, stage="export", config_path=config_path, message="Export cancelled before report finalization.")
         check = check_onnx_loadable(output_path)
-        report_path = output_dir / "export.report.json"
         report = {
             "status": "completed",
             "adapter": self.name,
@@ -405,14 +620,10 @@ class LocalTaskAdapter:
             "check": check,
             "output_format": self.output_format,
             "labels": config.get("labels", self.default_labels),
+            "onnx_source": "synthetic_baseline",
         }
-        if external_result:
-            report["external"] = external_result
         write_json(report_path, report)
-        payload = {"onnx": str(output_path), "report": str(report_path)}
-        if external_result:
-            payload["external"] = external_result
-        return AdapterResult(status="completed", path=output_path, payload=payload)
+        return AdapterResult(status="completed", path=output_path, payload={"onnx": str(output_path), "report": str(report_path)})
 
     def evaluate(
         self,
@@ -420,20 +631,21 @@ class LocalTaskAdapter:
         onnx_path: str | Path | None = None,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         config = read_yaml(config_path)
         output_dir = ensure_dir(_experiment_dir(config) / "eval")
         report_path = output_dir / "eval.report.json"
         if should_cancel and should_cancel():
             return _cancelled_result(report_path, adapter=self.name, stage="evaluation", config_path=config_path, message="Evaluation cancelled before execution.")
-        evaluation_config = config.get("evaluation", {})
-        external_command = evaluation_config.get("command") if isinstance(evaluation_config, dict) else None
+        evaluation_config = config.get("evaluation", {}) if isinstance(config.get("evaluation"), dict) else {}
+        external_command = evaluation_config.get("command")
         external_result: dict[str, Any] | None = None
         if onnx_path is None:
             architecture = str(config.get("model", {}).get("architecture", self.task))
             onnx_path = _experiment_dir(config) / "export" / _artifact_name(config, self.task, architecture)
         if not Path(onnx_path).exists():
-            export_result = self.export(config_path, should_cancel=should_cancel)
+            export_result = self.export(config_path, should_cancel=should_cancel, log_sink=log_sink)
             if export_result.status == "cancelled":
                 report = {"status": "cancelled", "adapter": self.name, "task": self.task, "export": export_result.to_dict(), "message": "Evaluation cancelled while preparing export."}
                 write_json(report_path, report)
@@ -444,7 +656,13 @@ class LocalTaskAdapter:
                 return AdapterResult("failed", report_path, {"report": str(report_path)})
             onnx_path = export_result.payload.get("onnx") or export_result.path
         if external_command:
-            external_result = _run_external_command(external_command, cwd=_command_cwd(evaluation_config), stage="evaluation", should_cancel=should_cancel)
+            external_result = _run_external_command(
+                external_command,
+                cwd=_command_cwd(evaluation_config),
+                stage="evaluation",
+                should_cancel=should_cancel,
+                log_sink=log_sink,
+            )
             if external_result.get("cancelled"):
                 report = {
                     "status": "cancelled",
@@ -471,8 +689,39 @@ class LocalTaskAdapter:
             return _cancelled_result(report_path, adapter=self.name, stage="evaluation", config_path=config_path, message="Evaluation cancelled before report finalization.")
         check = check_onnx_loadable(onnx_path)
         export_report = _read_optional_json(_experiment_dir(config) / "export" / "export.report.json")
-        metrics = dict(self.default_metrics)
-        metrics.update(config.get("evaluation", {}).get("expected_metrics", {}) or {})
+
+        # 指标来源优先级：外部命令产出的实测指标 > 配置自报期望值 > baseline 默认值。
+        metrics: dict[str, float]
+        metrics_source: str
+        produced_metrics, produced_error = _read_produced_metrics(evaluation_config)
+        declared_produced = bool(evaluation_config.get("produced_metrics") or evaluation_config.get("metrics_file"))
+        if declared_produced and produced_metrics is None:
+            # 声明了 produced_metrics 但回读失败：这是评估契约破裂，必须失败而非静默回落。
+            report = {
+                "status": "failed",
+                "adapter": self.name,
+                "task": self.task,
+                "onnx": str(onnx_path),
+                "external": external_result,
+                "message": f"Failed to read produced_metrics: {produced_error}",
+            }
+            write_json(report_path, report)
+            return AdapterResult("failed", report_path, {"report": str(report_path), "external": external_result})
+        if produced_metrics is not None:
+            metrics = produced_metrics
+            metrics_source = "measured"
+            message = "Evaluation metrics were read from the external command's produced_metrics file."
+        else:
+            metrics = dict(self.default_metrics)
+            declared = evaluation_config.get("expected_metrics", {}) or {}
+            if isinstance(declared, dict) and declared:
+                metrics.update({str(k): float(v) for k, v in declared.items() if isinstance(v, (int, float)) and not isinstance(v, bool)})
+                metrics_source = "declared"
+                message = "Evaluation metrics are DECLARED expected values from the config, not measured results. Configure evaluation.produced_metrics for real metrics."
+            else:
+                metrics_source = "baseline"
+                message = "Evaluation is a deterministic local baseline until task-specific metric code is configured."
+
         report = {
             "status": "completed",
             "adapter": self.name,
@@ -480,13 +729,14 @@ class LocalTaskAdapter:
             "onnx": str(onnx_path),
             "check": check,
             "metrics": metrics,
+            "metrics_source": metrics_source,
             "export": export_report,
-            "message": "Evaluation is a deterministic local baseline until task-specific metric code is configured.",
+            "message": message,
         }
         if external_result:
             report["external"] = external_result
         write_json(report_path, report)
-        payload = {"report": str(report_path), "metrics": metrics}
+        payload = {"report": str(report_path), "metrics": metrics, "metrics_source": metrics_source}
         if external_result:
             payload["external"] = external_result
         return AdapterResult(status="completed", path=report_path, payload=payload)

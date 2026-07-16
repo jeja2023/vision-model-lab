@@ -52,8 +52,10 @@ class Settings:
 
 def load_settings() -> Settings:
     workspace_root = Path(os.environ.get("VMLAB_WORKSPACE", Path.cwd())).resolve()
-    metadata_db = os.environ.get("VMLAB_METADATA_DB", ":memory:")
-    if metadata_db != ":memory:" and not Path(metadata_db).is_absolute():
+    # 默认使用持久化 SQLite 文件：':memory:' 会在服务重启时静默清空全部元数据，
+    # 仅当显式配置时才使用（/health 会标记 metadata_persistent=false）。
+    metadata_db = os.environ.get("VMLAB_METADATA_DB", "artifacts/vision_model_lab.sqlite3")
+    if metadata_db != ":memory:" and not metadata_db.startswith(("postgresql://", "postgres://")) and not Path(metadata_db).is_absolute():
         metadata_db = str(workspace_root / metadata_db)
     return Settings(
         workspace_root=workspace_root,

@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
+LogLineSink = Callable[[str, str], None]
+"""外部命令逐行日志回调：(stream, line)。"""
+
+
 @dataclass(frozen=True)
 class AdapterResult:
     status: str
@@ -30,6 +34,7 @@ class TaskAdapter(Protocol):
         config_path: str | Path,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         ...
 
@@ -38,6 +43,7 @@ class TaskAdapter(Protocol):
         config_path: str | Path,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         ...
 
@@ -47,5 +53,6 @@ class TaskAdapter(Protocol):
         onnx_path: str | Path | None = None,
         *,
         should_cancel: Callable[[], bool] | None = None,
+        log_sink: LogLineSink | None = None,
     ) -> AdapterResult:
         ...

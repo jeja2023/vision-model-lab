@@ -1,6 +1,6 @@
 import { FileSearch } from "lucide-react";
 import { useState } from "react";
-import { validateContract, validateManifest } from "../api";
+import { errorMessage, validateContract, validateManifest } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
 import type { ContractValidation, ManifestValidation } from "../types";
 import { zhContractKind, zhIssue, zhIssueDetail, zhSplit } from "../i18n";
@@ -23,15 +23,26 @@ export function DataLabeling() {
   const [contractPath, setContractPath] = useState<string>(contractTemplates["models-fragment"]);
   const [customContractPath, setCustomContractPath] = useState(false);
   const [contractResult, setContractResult] = useState<ContractValidation | null>(null);
+  const [message, setMessage] = useState("");
 
   async function submit() {
-    const response = await validateManifest(manifestPath);
-    setResult(response.manifest);
+    setMessage("");
+    try {
+      const response = await validateManifest(manifestPath);
+      setResult(response.manifest);
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
   }
 
   async function submitContract() {
-    const response = await validateContract(contractKind, contractPath);
-    setContractResult(response.contract);
+    setMessage("");
+    try {
+      const response = await validateContract(contractKind, contractPath);
+      setContractResult(response.contract);
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
   }
 
   return (
@@ -125,6 +136,7 @@ export function DataLabeling() {
 
       <section className="panel">
         <h1>结果</h1>
+        {message ? <p className="inline-message">{message}</p> : null}
         {result ? (
           <>
             <div className="summary-line">

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vision-model-lab"
-version = "0.4.1"
+version = "0.5.0"
 description = "Model research, evaluation, ONNX export, and delivery tooling for vision systems."
 requires-python = ">=3.11"
 dependencies = [
@@ -27,7 +27,8 @@ s3 = [
   "boto3>=1.34"
 ]
 postgres = [
-  "psycopg[binary]>=3.2"
+  "psycopg[binary]>=3.2",
+  "psycopg-pool>=3.2"
 ]
 migrations = [
   "alembic>=1.13",

@@ -13,11 +13,13 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--reload", action="store_true")
-    parser.add_argument("--metadata-db", default=os.environ.get("VMLAB_METADATA_DB", ":memory:"))
+    parser.add_argument("--metadata-db", default=os.environ.get("VMLAB_METADATA_DB", "artifacts/vision_model_lab.sqlite3"))
     args = parser.parse_args()
 
     os.environ.setdefault("VMLAB_WORKSPACE", str(Path(__file__).resolve().parents[1]))
     os.environ["VMLAB_METADATA_DB"] = args.metadata_db
+    if args.metadata_db == ":memory:":
+        print("[警告] 元数据库为 :memory:，服务重启后所有实验/审批/审计记录将全部丢失。", flush=True)
 
     import uvicorn
 

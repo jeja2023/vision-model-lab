@@ -1,0 +1,70 @@
+# 外部训练框架全链路示例（以 Ultralytics YOLO 为例）
+# 演示 0.5.0 的外部命令产物契约：produced_onnx（真实导出回传）与 produced_metrics（真实指标回读）。
+# 部署环境需自行安装 ultralytics；命令均为 argv 列表（shell 字符串默认禁用）。
+
+experiment:
+  id: person_detector_ultralytics_20260716_001
+  task: detection
+  project: cross_camera_tracking
+  status: planned
+  seed: 42
+
+dataset:
+  name: person_detection_dataset
+  version: 1.0.0
+  train_manifest: data/manifests/person_detection_train_v1.jsonl
+  val_manifest: data/manifests/person_detection_val_v1.jsonl
+
+model:
+  architecture: yolov8n
+  version: 1.0.0
+  pretrained: true
+  input_size: [640, 640]
+
+labels:
+  - person
+
+training:
+  adapter: ultralytics_yolo
+  # 外部训练命令：stdout/stderr 会逐行写入任务日志，训练期间可在管理台实时查看。
+  command:
+    - python
+    - -m
+    - ultralytics
+    - train
+    - model=yolov8n.pt
+    - data=configs/experiments/ultralytics_data.yaml
+    - epochs=100
+    - batch=16
+    - project=experiments/local_runs/person_detector_ultralytics_20260716_001
+    - name=train
+
+export:
+  adapter: ultralytics_yolo
+  artifact_name: person_detector_yolov8n_v1.1.0_fp32.onnx
+  format: onnx
+  precision: fp32
+  # 外部导出命令产出真实 ONNX；平台复制到目标路径并立即校验，绝不覆盖为合成模型。
+  command:
+    - python
+    - -m
+    - ultralytics
+    - export
+    - model=experiments/local_runs/person_detector_ultralytics_20260716_001/train/weights/best.pt
+    - format=onnx
+    - opset=17
+  produced_onnx: experiments/local_runs/person_detector_ultralytics_20260716_001/train/weights/best.onnx
+
+evaluation:
+  adapter: ultralytics_yolo
+  primary_metric: map50
+  # 外部评估命令必须把真实指标写成 JSON 文件；平台回读后标注 metrics_source=measured。
+  # 声明了 produced_metrics 但文件缺失/非法时评估阶段直接失败，不会静默回落到自报值。
+  command:
+    - python
+    - scripts/examples/ultralytics_val_to_metrics.py
+    - --weights
+    - experiments/local_runs/person_detector_ultralytics_20260716_001/train/weights/best.pt
+    - --output
+    - experiments/local_runs/person_detector_ultralytics_20260716_001/eval/metrics.json
+  produced_metrics: experiments/local_runs/person_detector_ultralytics_20260716_001/eval/metrics.json

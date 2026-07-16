@@ -18,7 +18,11 @@ def main() -> int:
     args = parser.parse_args()
     result = run_experiment_pipeline(args.config, package=args.package, output_root=args.output_root)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result.get("status") == "completed" else 2
+    status = result.get("status")
+    if status == "completed":
+        return 0
+    # 取消（4）与失败（2）区分退出码，便于 CI 编排判断。
+    return 4 if status == "cancelled" else 2
 
 
 if __name__ == "__main__":

@@ -21,6 +21,26 @@ import type {
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const API_TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
 
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export function errorMessage(error: unknown) {
+  if (error instanceof ApiError) {
+    return `请求失败（${error.status}）：${error.message}`;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return "请求失败";
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
@@ -32,7 +52,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+    throw new ApiError(response.status, text || `HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;
 }
@@ -120,8 +140,23 @@ export function cancelPipelineJob(jobId: number) {
   return request<{ job: PipelineJobRecord }>(`/api/pipelines/jobs/${jobId}/cancel`, { method: "POST" });
 }
 
-export function listPipelineJobLogs(jobId: number) {
-  return request<{ logs: PipelineJobLog[] }>(`/api/pipelines/jobs/${jobId}/logs`);
+export function listPipelineJobLogs(jobId: number, options?: { sinceId?: number; tail?: boolean; limit?: number }) {
+  const params = new URLSearchParams();
+  if (options?.sinceId !== undefined) {
+    params.set("since_id", String(options.sinceId));
+  }
+  if (options?.tail) {
+    params.set("tail", "true");
+  }
+  if (options?.limit) {
+    params.set("limit", String(options.limit));
+  }
+  const query = params.toString();
+  return request<{ logs: PipelineJobLog[] }>(`/api/pipelines/jobs/${jobId}/logs${query ? `?${query}` : ""}`);
+}
+
+export function artifactDownloadUrl(artifactId: number) {
+  return `${API_BASE}/api/pipelines/artifacts/${artifactId}/download`;
 }
 
 export function listPipelineJobArtifacts(jobId: number) {

@@ -13,6 +13,11 @@ def fetch(url: str) -> tuple[int, str]:
             return response.status, response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        # 服务未启动/连接拒绝是本脚本最核心的检测场景，必须输出合法报告而非崩溃。
+        return 0, f"connection failed: {exc.reason}"
+    except OSError as exc:
+        return 0, f"connection failed: {exc}"
 
 
 def main() -> int:

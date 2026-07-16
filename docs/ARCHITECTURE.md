@@ -58,6 +58,7 @@ Storage
 - `GET /api/pipelines/jobs/{job_id}/artifacts`
 - `POST /api/pipelines/jobs/{job_id}/cancel`
 - `POST /api/pipelines/jobs/{job_id}/retry`
+- `GET /api/pipelines/artifacts/{artifact_id}/download`
 - `POST /api/packages/create`
 - `POST /api/uploads`
 - `POST /api/error-analysis`
@@ -66,6 +67,16 @@ Storage
 - `GET|POST /api/models/registry`
 - `GET|POST /api/releases/approvals`
 - `GET|POST /api/deployments/rollouts`
+
+## 外部命令适配器契约
+
+`training` / `export` / `evaluation` 三个阶段均支持 `command`（argv 列表；字符串 shell 命令默认禁用，需 `VMLAB_ALLOW_SHELL_COMMANDS=true`）与 `command_cwd`（限定在工作区内）。关键产物契约：
+
+- `export.produced_onnx`：外部导出命令产出的 ONNX 路径（经工作区边界校验）。命令成功后平台将其复制到目标产物路径并立即执行加载校验；**外部导出结果绝不会被合成基线模型覆盖**，报告中的 `onnx_source` 字段标识来源（`external_command` / `synthetic_baseline` / `reused`）。
+- `export.reuse_existing: true`：显式声明才复用已存在的可加载 ONNX；默认每次导出都重新生成，避免改配置重跑后静默交付旧模型。
+- `evaluation.produced_metrics`：外部评估命令输出的 JSON 指标文件路径。评估成功后平台回读该文件作为真实指标并标注 `metrics_source: measured`；声明了该字段但回读失败时评估阶段直接失败。未配置外部评估时，`expected_metrics` 会被标注为 `metrics_source: declared`（自报值），发布审批链路应据此区分指标可信度。
+
+运行时保障：外部命令 stdout/stderr 由 reader 线程逐行消费（无管道死锁），逐行写入任务日志；取消/超时会终止整棵进程树；子进程环境剥离平台鉴权与对象存储凭证；输出以 UTF-8 解码。
 
 ## 扩展边界
 

@@ -85,6 +85,7 @@ export type PipelineRunReport = {
   export?: Record<string, unknown>;
   evaluation?: {
     metrics?: Record<string, number>;
+    metrics_source?: "measured" | "declared" | "baseline" | string;
     [key: string]: unknown;
   };
   package?: {
@@ -94,6 +95,8 @@ export type PipelineRunReport = {
   };
   cancelled_stage?: string | null;
   cancelled_reason?: string | null;
+  failed_stage?: string | null;
+  failed_reason?: string | null;
   artifacts?: PipelineArtifact[];
   [key: string]: unknown;
 };

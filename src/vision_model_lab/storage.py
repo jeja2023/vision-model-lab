@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 
 SCHEMA_VERSION = "20260703_040_mlops_foundation"
+
+# 流水线任务终态：一旦进入不可回退。
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def utc_now_iso() -> str:
+    """统一时间戳格式：带 Z 后缀的毫秒级 ISO8601，SQLite/PostgreSQL 两后端输出一致。"""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class MetadataStore:
@@ -40,7 +51,7 @@ class MetadataStore:
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version TEXT PRIMARY KEY,
-                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -54,8 +65,8 @@ class MetadataStore:
                 status TEXT NOT NULL,
                 package TEXT,
                 metrics_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -68,7 +79,7 @@ class MetadataStore:
                 ok INTEGER NOT NULL,
                 sha256 TEXT,
                 report_json TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -79,7 +90,7 @@ class MetadataStore:
                 config_path TEXT NOT NULL,
                 status TEXT NOT NULL,
                 report_json TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -92,11 +103,11 @@ class MetadataStore:
                 request_json TEXT NOT NULL,
                 result_json TEXT,
                 error TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 started_at TEXT,
                 completed_at TEXT,
                 cancelled_at TEXT,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -108,7 +119,7 @@ class MetadataStore:
                 action TEXT NOT NULL,
                 target TEXT NOT NULL,
                 detail_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -120,7 +131,7 @@ class MetadataStore:
                 stream TEXT NOT NULL,
                 message TEXT NOT NULL,
                 detail_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -135,7 +146,7 @@ class MetadataStore:
                 path TEXT,
                 uri TEXT,
                 size INTEGER,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -151,8 +162,8 @@ class MetadataStore:
                 split_counts_json TEXT NOT NULL DEFAULT '{}',
                 labels_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'registered',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -167,8 +178,8 @@ class MetadataStore:
                 task TEXT NOT NULL,
                 metrics_json TEXT NOT NULL DEFAULT '{}',
                 stage TEXT NOT NULL DEFAULT 'candidate',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -180,8 +191,8 @@ class MetadataStore:
                 recommendation TEXT NOT NULL,
                 status TEXT NOT NULL,
                 decision_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -195,8 +206,8 @@ class MetadataStore:
                 status TEXT NOT NULL,
                 traffic_percent INTEGER NOT NULL DEFAULT 0,
                 rollback_target TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
@@ -244,6 +255,14 @@ class MetadataStore:
         except OSError:
             return False
         if not is_empty:
+            return False
+        # WAL 模式下存在"主库 0 字节 + 已提交数据全在 -wal"的合法状态；
+        # 此时删除 WAL 会静默丢已提交数据，必须交给 SQLite 自行恢复。
+        wal_file = Path(str(self.path) + "-wal")
+        try:
+            if wal_file.exists() and wal_file.stat().st_size > 0:
+                return False
+        except OSError:
             return False
         targets = self._database_family(self.path)
         removed_any = False
@@ -301,6 +320,7 @@ class MetadataStore:
             "status": payload.get("status", "planned"),
             "package": payload.get("package"),
             "metrics_json": json.dumps(metrics, ensure_ascii=False),
+            "updated_at": utc_now_iso(),
         }
         with self.connect() as connection:
             connection.execute(
@@ -314,7 +334,7 @@ class MetadataStore:
                     status=excluded.status,
                     package=excluded.package,
                     metrics_json=excluded.metrics_json,
-                    updated_at=CURRENT_TIMESTAMP
+                    updated_at=:updated_at
                 """,
                 record,
             )
@@ -327,9 +347,12 @@ class MetadataStore:
             raise KeyError(experiment_id)
         return self._experiment_row(row)
 
-    def list_experiments(self) -> list[dict[str, Any]]:
+    def list_experiments(self, limit: int = 500) -> list[dict[str, Any]]:
         with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM experiments ORDER BY created_at DESC").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM experiments ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [self._experiment_row(row) for row in rows]
 
     def record_package_validation(self, report: dict[str, Any]) -> dict[str, Any]:
@@ -353,7 +376,7 @@ class MetadataStore:
     def list_package_validations(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM package_validations ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM package_validations ORDER BY created_at DESC, id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._package_validation_row(row) for row in rows]
@@ -377,7 +400,7 @@ class MetadataStore:
     def list_pipeline_runs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM pipeline_runs ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM pipeline_runs ORDER BY created_at DESC, id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._pipeline_run_row(row) for row in rows]
@@ -402,61 +425,103 @@ class MetadataStore:
         return self.get_pipeline_job(job_id)
 
     def mark_pipeline_job_running(self, job_id: int) -> dict[str, Any]:
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE pipeline_jobs
-                SET status='running', started_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+                SET status='running', started_at=?, updated_at=?
                 WHERE id = ? AND status = 'queued'
                 """,
-                (job_id,),
+                (now, now, job_id),
             )
         return self.get_pipeline_job(job_id)
 
     def complete_pipeline_job(self, job_id: int, result: dict[str, Any], *, status: str = "completed") -> dict[str, Any]:
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE pipeline_jobs
-                SET status=?, result_json=?, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET status=?, result_json=?, completed_at=?, updated_at=?
+                WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
                 """,
-                (status, json.dumps(result, ensure_ascii=False), job_id),
+                (status, json.dumps(result, ensure_ascii=False), now, now, job_id),
             )
         return self.get_pipeline_job(job_id)
 
     def fail_pipeline_job(self, job_id: int, error: str, result: dict[str, Any] | None = None) -> dict[str, Any]:
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE pipeline_jobs
-                SET status='failed', error=?, result_json=?, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET status='failed', error=?, result_json=?, completed_at=?, updated_at=?
+                WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
                 """,
-                (error, json.dumps(result, ensure_ascii=False) if result is not None else None, job_id),
+                (error, json.dumps(result, ensure_ascii=False) if result is not None else None, now, now, job_id),
             )
         return self.get_pipeline_job(job_id)
 
     def request_pipeline_job_cancel(self, job_id: int) -> dict[str, Any]:
-        job = self.get_pipeline_job(job_id)
-        if job["status"] in {"completed", "failed", "cancelled"}:
-            return job
-        next_status = "cancelled" if job["status"] == "queued" else "cancellation_requested"
+        # 单条带守卫的 UPDATE 完成状态转移，杜绝 read-then-write 竞态回退终态。
+        self.get_pipeline_job(job_id)  # 确认存在，缺失时抛 KeyError
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE pipeline_jobs
-                SET status=?, cancelled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE 'cancellation_requested' END,
+                    cancelled_at=?, updated_at=?
+                WHERE id = ? AND status IN ('queued', 'running')
                 """,
-                (next_status, job_id),
+                (now, now, job_id),
             )
         return self.get_pipeline_job(job_id)
+
+    def recover_orphaned_jobs(self, *, error: str = "orphaned by service restart") -> list[dict[str, Any]]:
+        """服务重启后回收孤儿任务：running/cancellation_requested 标记失败，queued 保持待重新调度。"""
+        now = utc_now_iso()
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM pipeline_jobs WHERE status IN ('running', 'cancellation_requested')"
+            ).fetchall()
+            orphan_ids = [int(row["id"] if isinstance(row, dict) else row[0]) for row in rows]
+            if orphan_ids:
+                connection.execute(
+                    f"""
+                    UPDATE pipeline_jobs
+                    SET status='failed', error=?, completed_at=?, updated_at=?
+                    WHERE id IN ({','.join('?' * len(orphan_ids))})
+                    """,
+                    (error, now, now, *orphan_ids),
+                )
+        return [self.get_pipeline_job(job_id) for job_id in orphan_ids]
+
+    def list_queued_pipeline_jobs(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM pipeline_jobs WHERE status = 'queued' ORDER BY id ASC"
+            ).fetchall()
+        return [self._pipeline_job_row(row) for row in rows]
+
+    def has_active_pipeline_job(self, config_path: str) -> bool:
+        """同一配置存在未完结任务时返回 True，用于阻止并发重复执行互相覆盖产物。"""
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id FROM pipeline_jobs
+                WHERE config_path = ? AND status IN ('queued', 'running', 'cancellation_requested')
+                LIMIT 1
+                """,
+                (config_path,),
+            ).fetchone()
+        return row is not None
 
     def list_pipeline_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM pipeline_jobs ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM pipeline_jobs ORDER BY created_at DESC, id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._pipeline_job_row(row) for row in rows]
@@ -486,17 +551,47 @@ class MetadataStore:
             log_id = int(cursor.lastrowid)
         return self.get_pipeline_job_log(log_id)
 
-    def list_pipeline_job_logs(self, job_id: int, limit: int = 200) -> list[dict[str, Any]]:
+    def list_pipeline_job_logs(
+        self,
+        job_id: int,
+        limit: int = 200,
+        *,
+        since_id: int | None = None,
+        tail: bool = False,
+    ) -> list[dict[str, Any]]:
+        """列出任务日志。since_id 用于增量拉取；tail=True 返回最新 N 条（升序返回）。"""
         with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM pipeline_job_logs
-                WHERE job_id = ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (job_id, limit),
-            ).fetchall()
+            if since_id is not None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM pipeline_job_logs
+                    WHERE job_id = ? AND id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (job_id, since_id, limit),
+                ).fetchall()
+            elif tail:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM pipeline_job_logs
+                    WHERE job_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (job_id, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM pipeline_job_logs
+                    WHERE job_id = ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (job_id, limit),
+                ).fetchall()
         return [self._pipeline_job_log_row(row) for row in rows]
 
     def get_pipeline_job_log(self, log_id: int) -> dict[str, Any]:
@@ -581,7 +676,7 @@ class MetadataStore:
     def list_audit_events(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM audit_events ORDER BY created_at DESC, id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._audit_event_row(row) for row in rows]
@@ -598,6 +693,7 @@ class MetadataStore:
             "split_counts_json": json.dumps(split_counts, ensure_ascii=False),
             "labels_json": json.dumps(labels, ensure_ascii=False),
             "status": payload.get("status", "registered"),
+            "updated_at": utc_now_iso(),
         }
         with self.connect() as connection:
             connection.execute(
@@ -614,7 +710,7 @@ class MetadataStore:
                     split_counts_json=excluded.split_counts_json,
                     labels_json=excluded.labels_json,
                     status=excluded.status,
-                    updated_at=CURRENT_TIMESTAMP
+                    updated_at=:updated_at
                 """,
                 record,
             )
@@ -645,6 +741,7 @@ class MetadataStore:
             "task": payload["task"],
             "metrics_json": json.dumps(metrics, ensure_ascii=False),
             "stage": payload.get("stage", "candidate"),
+            "updated_at": utc_now_iso(),
         }
         with self.connect() as connection:
             connection.execute(
@@ -660,7 +757,7 @@ class MetadataStore:
                     task=excluded.task,
                     metrics_json=excluded.metrics_json,
                     stage=excluded.stage,
-                    updated_at=CURRENT_TIMESTAMP
+                    updated_at=:updated_at
                 """,
                 record,
             )
@@ -881,8 +978,8 @@ class _PostgresConnectionAdapter:
     def _prepare_sql(self, sql: str, params: Any) -> str:
         prepared = sql
         if isinstance(params, dict):
-            for key in params:
-                prepared = prepared.replace(f":{key}", f"%({key})s")
+            # 按词边界替换命名参数，避免前缀参数名（:task 与 :task_id）互相破坏。
+            prepared = re.sub(r":(\w+)\b", r"%(\1)s", prepared)
         else:
             prepared = prepared.replace("?", "%s")
         stripped = prepared.strip()
@@ -898,28 +995,57 @@ class _PostgresConnectionAdapter:
 class PostgresMetadataStore(MetadataStore):
     def __init__(self, dsn: str) -> None:
         self.path = dsn
-        self._lock = threading.RLock()
+        self._pool: Any = None
+        self._pool_lock = threading.Lock()
         self.initialize()
 
     @property
     def _shared_connection(self) -> None:
         return None
 
+    def _ensure_pool(self) -> Any:
+        if self._pool is not None:
+            return self._pool
+        with self._pool_lock:
+            if self._pool is not None:
+                return self._pool
+            try:
+                from psycopg_pool import ConnectionPool
+            except ImportError:
+                self._pool = False  # psycopg_pool 未安装时回落到按需建连
+                return self._pool
+            self._pool = ConnectionPool(
+                str(self.path),
+                min_size=1,
+                max_size=int(os.environ.get("VMLAB_PG_POOL_MAX_SIZE", "8")),
+                timeout=30,
+                open=True,
+            )
+            return self._pool
+
     @contextmanager
     def connect(self) -> Iterator[_PostgresConnectionAdapter]:
-        with self._lock:
-            try:
-                import psycopg
-                from psycopg.rows import dict_row
-            except ImportError as exc:  # pragma: no cover - optional deployment extra
-                raise RuntimeError("psycopg is required for PostgreSQL metadata storage; install vision-model-lab[postgres].") from exc
-            connection = psycopg.connect(str(self.path), row_factory=dict_row, connect_timeout=10)
-            adapter = _PostgresConnectionAdapter(connection)
-            try:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:  # pragma: no cover - optional deployment extra
+            raise RuntimeError("psycopg is required for PostgreSQL metadata storage; install vision-model-lab[postgres].") from exc
+        pool = self._ensure_pool()
+        if pool:
+            # 连接池路径：借还连接，PG 自身保证并发安全，无需进程级锁。
+            with pool.connection() as connection:
+                connection.row_factory = dict_row
+                adapter = _PostgresConnectionAdapter(connection)
                 yield adapter
-                adapter.commit()
-            finally:
-                adapter.close()
+                connection.commit()
+            return
+        connection = psycopg.connect(str(self.path), row_factory=dict_row, connect_timeout=10)
+        adapter = _PostgresConnectionAdapter(connection)
+        try:
+            yield adapter
+            adapter.commit()
+        finally:
+            adapter.close()
 
     def _initialize_connection(self, connection: Any) -> None:
         connection.execute(

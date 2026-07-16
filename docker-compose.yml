@@ -3,6 +3,11 @@ services:
     build: .
     ports:
       - "8080:8080"
+    restart: unless-stopped
+    # 本地 .env 优先；未提供时回落到 environment 中的默认值。
+    env_file:
+      - path: .env
+        required: false
     environment:
       VMLAB_WORKSPACE: /app
       VMLAB_METADATA_DB: artifacts/vision_model_lab.sqlite3
@@ -16,7 +21,55 @@ services:
       VMLAB_EXTERNAL_COMMAND_TIMEOUT_SECONDS: "3600"
       VMLAB_EXTERNAL_COMMAND_LOG_MAX_CHARS: "20000"
       VMLAB_ALLOW_SHELL_COMMANDS: "false"
+      # 生产环境必须设置 VMLAB_AUTH_TOKEN（写接口鉴权），建议通过 .env 注入。
     volumes:
       - ./artifacts:/app/artifacts
       - ./shared-models:/app/shared-models
       - ./data:/app/data:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # 可选生产形态：docker compose --profile postgres up
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vmlab
+      POSTGRES_USER: vmlab
+      POSTGRES_PASSWORD: ${VMLAB_POSTGRES_PASSWORD:-vmlab-dev-only}
+    volumes:
+      - vmlab-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vmlab -d vmlab"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 可选生产形态：docker compose --profile minio up
+  minio:
+    image: minio/minio:latest
+    profiles: ["minio"]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${VMLAB_MINIO_ROOT_USER:-vmlab}
+      MINIO_ROOT_PASSWORD: ${VMLAB_MINIO_ROOT_PASSWORD:-vmlab-dev-only}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - vmlab-minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  vmlab-postgres:
+  vmlab-minio:

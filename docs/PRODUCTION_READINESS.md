@@ -5,7 +5,7 @@
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `VMLAB_WORKSPACE` | 当前工作目录 | 工作区根路径 |
-| `VMLAB_METADATA_DB` | `:memory:` | SQLite 元数据路径或 PostgreSQL DSN |
+| `VMLAB_METADATA_DB` | `artifacts/vision_model_lab.sqlite3` | SQLite 元数据路径或 PostgreSQL DSN；`:memory:` 仅供测试，重启即丢数据 |
 | `VMLAB_CORS_ORIGINS` | `*` | API CORS 白名单，生产应显式配置 |
 | `VMLAB_SERVE_FRONTEND` | `true` | 是否由 FastAPI 托管前端构建产物 |
 | `VMLAB_FRONTEND_DIST` | `frontend/dist` | 前端构建目录 |
@@ -69,7 +69,13 @@ docker build `
   -t vision-model-lab:local .
 ```
 
-当前 Dockerfile 默认使用已验证镜像源；如果部署环境可直连 Docker Hub，可通过 build args 覆盖为 `node:22-alpine` 和 `python:3.12-slim`。
+当前 Dockerfile 默认使用 Docker Hub 官方镜像（`node:22-alpine`、`python:3.12-slim`），与 CI 行为一致；受限网络环境按上例通过 build args 覆盖为内部镜像源。镜像以非 root 用户 `vmlab` 运行并内置 HEALTHCHECK。
+
+可选生产形态（PostgreSQL / MinIO）：
+
+```powershell
+docker compose --profile postgres --profile minio up --build
+```
 
 ## 当前门禁
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from vision_model_lab.adapters.base import AdapterResult, TaskAdapter
+from vision_model_lab.adapters.base import AdapterResult, LogLineSink, TaskAdapter
 from vision_model_lab.adapters.local_tasks import (
     CLASSIFICATION_BASELINE,
     DETECTION_YOLO_BASELINE,
@@ -73,12 +73,13 @@ def run_stage(
     *,
     onnx_path: str | Path | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    log_sink: LogLineSink | None = None,
 ) -> AdapterResult:
     adapter = resolve_adapter(config_path, stage)
     if stage == "training":
-        return adapter.train(config_path, should_cancel=should_cancel)
+        return adapter.train(config_path, should_cancel=should_cancel, log_sink=log_sink)
     if stage == "export":
-        return adapter.export(config_path, should_cancel=should_cancel)
+        return adapter.export(config_path, should_cancel=should_cancel, log_sink=log_sink)
     if stage == "evaluation":
-        return adapter.evaluate(config_path, onnx_path, should_cancel=should_cancel)
+        return adapter.evaluate(config_path, onnx_path, should_cancel=should_cancel, log_sink=log_sink)
     raise ValueError(f"Unsupported stage: {stage}")

@@ -1,27 +1,42 @@
 import { Save } from "lucide-react";
 import { useState } from "react";
-import { saveExperiment } from "../api";
+import { errorMessage, saveExperiment } from "../api";
 import type { ExperimentRecord } from "../types";
-import { zhField, zhStatus } from "../i18n";
+import { zhStatus } from "../i18n";
 
 type ExperimentsProps = {
   experiments: ExperimentRecord[];
   onRefresh: () => void;
 };
 
+// 表单存英文码、展示层用 zhStatus 翻译——避免中文显示值污染后端状态词汇表。
+const taskOptions = ["detection", "classification", "segmentation", "reid", "reference"] as const;
+const statusOptions = ["planned", "running", "completed", "failed", "packaged"] as const;
+
 export function Experiments({ experiments, onRefresh }: ExperimentsProps) {
   const [record, setRecord] = useState<ExperimentRecord>({
-    id: "行人检测实验_20260603_001",
-    task: "目标检测",
-    dataset: "行人检测数据集_v1.0.0",
-    model: "小型目标检测基线",
-    status: "计划中",
+    id: "person_detector_20260603_001",
+    task: "detection",
+    dataset: "person_detection_dataset_v1.0.0",
+    model: "yolov8n",
+    status: "planned",
     package: ""
   });
+  const [message, setMessage] = useState("");
 
   async function submit() {
-    await saveExperiment(record);
-    onRefresh();
+    if (!record.id.trim()) {
+      setMessage("实验编号不能为空");
+      return;
+    }
+    setMessage("");
+    try {
+      await saveExperiment(record);
+      setMessage("已保存");
+      onRefresh();
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
   }
 
   return (
@@ -35,16 +50,44 @@ export function Experiments({ experiments, onRefresh }: ExperimentsProps) {
           </button>
         </div>
         <div className="form-grid">
-          {(["id", "task", "dataset", "model", "status", "package"] as const).map((field) => (
-            <label key={field}>
-              <span>{zhField(field)}</span>
-              <input
-                value={(record[field] as string | null | undefined) ?? ""}
-                onChange={(event) => setRecord({ ...record, [field]: event.target.value })}
-              />
-            </label>
-          ))}
+          <label>
+            <span>实验编号</span>
+            <input value={record.id} onChange={(event) => setRecord({ ...record, id: event.target.value })} />
+          </label>
+          <label>
+            <span>任务类型</span>
+            <select value={record.task} onChange={(event) => setRecord({ ...record, task: event.target.value })}>
+              {taskOptions.map((option) => (
+                <option key={option} value={option}>
+                  {zhStatus(option)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>数据集</span>
+            <input value={record.dataset} onChange={(event) => setRecord({ ...record, dataset: event.target.value })} />
+          </label>
+          <label>
+            <span>模型</span>
+            <input value={record.model} onChange={(event) => setRecord({ ...record, model: event.target.value })} />
+          </label>
+          <label>
+            <span>状态</span>
+            <select value={record.status} onChange={(event) => setRecord({ ...record, status: event.target.value })}>
+              {statusOptions.map((option) => (
+                <option key={option} value={option}>
+                  {zhStatus(option)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>模型包</span>
+            <input value={record.package ?? ""} onChange={(event) => setRecord({ ...record, package: event.target.value })} placeholder="可选" />
+          </label>
         </div>
+        {message ? <p className="inline-message">{message}</p> : null}
       </section>
 
       <section className="panel">

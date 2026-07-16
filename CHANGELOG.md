@@ -2,6 +2,65 @@
 
 本文件记录 `vision-model-lab` 的主要功能变更、交付状态和验证结果。格式参考 Keep a Changelog，版本号遵循语义化版本。
 
+## [0.5.0] - 2026-07-16
+
+本次为可信性与生产可用性大版本：修复了交付信任链上的全部严重缺陷，并系统性升级任务运行时、元数据存储、前端与部署配置。
+
+### 修复（交付信任链）
+
+- 修复外部导出命令产出的真实 ONNX 被合成桩模型无条件覆盖的严重缺陷；外部导出成功后立即校验并返回，报告新增 `onnx_source` 字段（`external_command` / `synthetic_baseline` / `reused`）。
+- 修复外部命令 stdout/stderr 无并发读取导致长日志（>64KB）必然管道死锁的问题；改为 reader 线程逐行消费，并通过 `log_sink` 将外部命令输出逐行写入任务日志。
+- 训练/导出/评估任一阶段失败立即短路，报告新增 `failed_stage` / `failed_reason`；打包前强制校验流水线状态为 `completed`，失败的运行绝不产出模型包。
+- 新增评估指标回读协议：`evaluation.produced_metrics` 指向外部命令输出的 JSON 指标文件，adapter 回读后写入报告并标注 `metrics_source: measured`；声明了该字段但回读失败时评估失败而非静默回落；自报指标标注 `declared`，前端展示区分「实测/自报/基线」徽章。
+- 导出阶段默认不再复用已存在的 ONNX；显式配置 `export.reuse_existing: true` 时才复用可加载产物。
+
+### 修复（任务运行时）
+
+- 取消/超时改为终止整棵进程树（Windows 用 `taskkill /T`，POSIX 用进程组信号），不再泄漏 DataLoader/torchrun 等孙进程。
+- 外部命令显式使用 UTF-8 解码（`errors="replace"`），中文 Windows 环境下不再因 GBK 解码失败导致任务崩溃。
+- 外部命令环境剥离 `VMLAB_AUTH_TOKEN`、S3/AWS 凭证等平台机密。
+- 日志截断改为保留头部+尾部（失败排障最需要的 Traceback 在尾部）。
+- 阶段级异常兜底：适配器抛出的未捕获异常转为结构化 failed 载荷，保留已完成阶段的结果。
+- 产物目录统一锚定 `VMLAB_WORKSPACE`，服务进程 CWD 与工作区不一致时产物不再"失联"。
+
+### 修复（元数据存储与 API）
+
+- 任务状态机改为单条带守卫的 UPDATE：终态（completed/failed/cancelled）不可被取消或迟到的完成回退。
+- 服务启动时回收孤儿任务（running/cancellation_requested → failed）并重新提交 queued 任务；关闭时优雅停机线程池。
+- 任务日志支持 `since_id` 增量拉取与 `tail` 取尾；长任务最新日志不再不可达。
+- 时间戳统一为带 Z 后缀的 ISO8601（毫秒级），SQLite/PostgreSQL 两后端输出一致，前端解析不再产生时区偏移。
+- `VMLAB_METADATA_DB` 默认值从 `:memory:` 改为 `artifacts/vision_model_lab.sqlite3`；`/health` 新增 `metadata_persistent` 字段。
+- 空库清理守卫：WAL 文件非空时拒绝删除，杜绝崩溃恢复窗口的静默丢数据。
+- PostgreSQL 改用 psycopg_pool 连接池（未安装时回落按需建连），去掉全局锁串行化；`_prepare_sql` 命名参数改为词边界正则替换。
+- 同一配置存在未完结任务时拒绝重复提交（409）；retry 仅允许终态任务。
+- 新增 `GET /api/pipelines/artifacts/{id}/download` 产物下载端点。
+- Alembic 迁移脚本与运行时 DDL 对齐（PG TIMESTAMPTZ/BIGSERIAL，SQLite TEXT/INTEGER）；`vmlab storage migrate` 优先调用 alembic upgrade head。
+
+### 修复（前端）
+
+- 修复 Pipeline 页面 69 处中文乱码（非 UTF-8 编辑器保存事故），CI 新增乱码检查，新增 `.editorconfig` 锁定 UTF-8。
+- 轮询降载：高频轮询只拉任务列表，全库包扫描仅在任务完结时刷新一次；adapters/审计事件只在挂载时拉取。
+- 引入结构化 `ApiError`（含 HTTP 状态码），`Promise.allSettled` 替代 `Promise.all`，单端点失败不再全局瘫痪。
+- Packages/DataLabeling/Experiments 页面补齐错误处理；Packages 页渲染完整校验结果（issue 列表）。
+- 实验表单 task/status 改为下拉枚举（存英文码、显示中文），不再以中文显示值污染后端词汇表。
+- 产物链接改为可用的下载端点，展示人类可读文件大小；任务详情竞态保护（仅接受最后一次请求的响应）。
+- 实验列表按 id 去重合并 DB 与 index.yml 记录；新增 `:focus-visible` 焦点环与 `aria-selected`。
+
+### 修复（工程化与部署）
+
+- `.env` 移出版本库（`git rm --cached`）并加入 `.gitignore`；`start_lab.py` 首次启动自动从 `.env.example` 复制；env 测试改为防泄漏检查。
+- `start_lab.py` 的 dotenv 加载不再覆盖 shell 中显式导出的环境变量。
+- Dockerfile：非 root 运行、HEALTHCHECK、依赖层与源码层分离、默认基础镜像改回 docker.io 官方镜像。
+- docker-compose：restart 策略、healthcheck、`env_file` 支持、可选 postgres/minio profiles。
+- CI：乱码检查、`npm audit --omit=dev --audit-level=high`、acceptance_check 支持 `--skip-pytest` 消除重复执行、并发取消、acceptance 子进程 600 秒超时。
+- `runtime_check.py` 处理连接拒绝（URLError），服务未启动时输出合法 JSON 报告而非崩溃。
+- `scripts/train.py` 移除死状态 `external_command_declared`；`run_pipeline.py` 取消（4）与失败（2）退出码区分。
+
+### 新增
+
+- 适配器契约新增 `log_sink` 逐行日志回调，异步任务运行期间可实时查看外部命令输出。
+- 回归测试从 39 条扩充到 60 条：覆盖导出覆盖、管道死锁、失败短路、指标回读、状态机守卫、孤儿回收、日志分页、时区、WAL 守卫、`_prepare_sql` 纯函数等关键路径。
+
 ## [0.4.1] - 2026-07-13
 
 ### 新增

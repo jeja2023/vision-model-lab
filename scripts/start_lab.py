@@ -45,8 +45,18 @@ def load_dotenv(path: Path) -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
-        if name:
+        # 不覆盖用户在 shell 中显式导出的变量（与 python-dotenv 默认行为一致）。
+        if name and name not in os.environ:
             os.environ[name] = value
+
+
+def ensure_env_file(root: Path) -> None:
+    """.env 不入库；首次启动时自动从 .env.example 复制一份本地配置。"""
+    env_file = root / ".env"
+    example = root / ".env.example"
+    if not env_file.exists() and example.exists():
+        env_file.write_text(example.read_text(encoding="utf-8-sig"), encoding="utf-8")
+        print("[准备] 已从 .env.example 生成本地 .env（该文件不会提交到 git）。", flush=True)
 
 
 def venv_python(root: Path) -> Path:
@@ -103,6 +113,7 @@ def ensure_frontend(root: Path, skip_build: bool) -> None:
 
 
 def configure_environment(root: Path) -> None:
+    ensure_env_file(root)
     load_dotenv(root / ".env")
 
     if not os.environ.get("VMLAB_WORKSPACE") or os.environ["VMLAB_WORKSPACE"] == ".":

@@ -39,6 +39,7 @@ experiments/local_runs/
 !experiments/local_runs/.gitkeep
 
 # Local environment and build metadata
+.env
 *.egg-info/
 *.sqlite3
 *.sqlite3-journal

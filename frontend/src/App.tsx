@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getHealth, listExperiments, listPackageValidations, listPipelineRuns, scanPackages } from "./api";
+import { errorMessage, getHealth, listExperiments, listPackageValidations, listPipelineRuns, scanPackages } from "./api";
 import { Shell, type ViewKey } from "./components/Shell";
 import { DataLabeling } from "./pages/DataLabeling";
 import { Experiments } from "./pages/Experiments";
@@ -7,6 +7,18 @@ import { Overview } from "./pages/Overview";
 import { Packages } from "./pages/Packages";
 import { Pipeline } from "./pages/Pipeline";
 import type { ExperimentRecord, Health, PackageValidation, PackageValidationRecord, PipelineRunRecord } from "./types";
+
+function dedupeExperiments(records: ExperimentRecord[], index: ExperimentRecord[]): ExperimentRecord[] {
+  // DB 记录优先，index.yml 仅补充 DB 中不存在的实验，避免同 id 重复渲染。
+  const merged = new Map<string, ExperimentRecord>();
+  for (const record of index) {
+    merged.set(record.id, record);
+  }
+  for (const record of records) {
+    merged.set(record.id, record);
+  }
+  return Array.from(merged.values());
+}
 
 export function App() {
   const [activeView, setActiveView] = useState<ViewKey>("overview");
@@ -18,22 +30,31 @@ export function App() {
   const [apiStatus, setApiStatus] = useState("接口连接中");
 
   const refresh = useCallback(async () => {
-    try {
-      const [healthResponse, packageResponse, validationResponse, experimentResponse, pipelineResponse] = await Promise.all([
-        getHealth(),
-        scanPackages(),
-        listPackageValidations(),
-        listExperiments(),
-        listPipelineRuns()
-      ]);
-      setHealth(healthResponse);
-      setPackages(packageResponse.packages);
-      setValidations(validationResponse.validations);
-      setExperiments([...experimentResponse.experiments, ...experimentResponse.index]);
-      setPipelineRuns(pipelineResponse.runs);
+    // allSettled：单个端点失败不影响其他数据更新。
+    const [healthResult, packageResult, validationResult, experimentResult, pipelineResult] = await Promise.allSettled([
+      getHealth(),
+      scanPackages(),
+      listPackageValidations(),
+      listExperiments(),
+      listPipelineRuns()
+    ]);
+    if (healthResult.status === "fulfilled") {
+      setHealth(healthResult.value);
       setApiStatus("接口在线");
-    } catch (error) {
-      setApiStatus(error instanceof Error && error.message.startsWith("请求失败") ? error.message : "接口异常");
+    } else {
+      setApiStatus(errorMessage(healthResult.reason));
+    }
+    if (packageResult.status === "fulfilled") {
+      setPackages(packageResult.value.packages);
+    }
+    if (validationResult.status === "fulfilled") {
+      setValidations(validationResult.value.validations);
+    }
+    if (experimentResult.status === "fulfilled") {
+      setExperiments(dedupeExperiments(experimentResult.value.experiments, experimentResult.value.index));
+    }
+    if (pipelineResult.status === "fulfilled") {
+      setPipelineRuns(pipelineResult.value.runs);
     }
   }, []);
 

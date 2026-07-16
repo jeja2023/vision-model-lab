@@ -1,9 +1,9 @@
 import { Play, Search } from "lucide-react";
 import { useState } from "react";
-import { validatePackage } from "../api";
+import { errorMessage, validatePackage } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
-import type { PackageValidation } from "../types";
-import { zhIssue } from "../i18n";
+import type { PackageValidation, PackageValidationRecord } from "../types";
+import { zhIssue, zhIssueDetail } from "../i18n";
 
 type PackagesProps = {
   packages: PackageValidation[];
@@ -15,6 +15,10 @@ const packageDirectoryOptions = [
   { label: "自定义目录", value: "custom" }
 ] as const;
 
+function isValidationRecord(value: PackageValidation | PackageValidationRecord): value is PackageValidationRecord {
+  return "report" in value;
+}
+
 export function Packages({ packages, onRefresh }: PackagesProps) {
   const [packageDir, setPackageDir] = useState("shared-models");
   const [packageDirMode, setPackageDirMode] = useState<(typeof packageDirectoryOptions)[number]["value"]>("shared-models");
@@ -23,18 +27,29 @@ export function Packages({ packages, onRefresh }: PackagesProps) {
   const [strictExamples, setStrictExamples] = useState(true);
   const [strictOnnx, setStrictOnnx] = useState(false);
   const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<PackageValidation | null>(null);
 
   async function runValidation() {
-    setMessage("校验中");
-    await validatePackage({
-      package_dir: packageDir,
-      model_id: modelId || undefined,
-      strict_hash: strictHash,
-      strict_examples: strictExamples,
-      strict_onnx: strictOnnx
-    });
-    setMessage("已完成");
-    onRefresh();
+    setBusy(true);
+    setMessage("校验中…");
+    try {
+      const response = await validatePackage({
+        package_dir: packageDir,
+        model_id: modelId || undefined,
+        strict_hash: strictHash,
+        strict_examples: strictExamples,
+        strict_onnx: strictOnnx
+      });
+      const validation = isValidationRecord(response.validation) ? response.validation.report : response.validation;
+      setResult(validation);
+      setMessage(validation.ok ? "校验通过" : "校验未通过");
+      onRefresh();
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -42,7 +57,7 @@ export function Packages({ packages, onRefresh }: PackagesProps) {
       <section className="panel">
         <div className="panel-header">
           <h1>模型包校验</h1>
-          <button className="primary-button" onClick={runValidation} title="执行校验">
+          <button className="primary-button" onClick={runValidation} title="执行校验" disabled={busy}>
             <Play size={17} />
             <span>执行</span>
           </button>
@@ -91,6 +106,30 @@ export function Packages({ packages, onRefresh }: PackagesProps) {
           </label>
         </div>
         {message ? <p className="inline-message">{message}</p> : null}
+      </section>
+
+      <section className="panel">
+        <h1>校验结果</h1>
+        {result ? (
+          <>
+            <div className="summary-line">
+              <StatusBadge ok={result.ok} />
+              <span className="mono">{result.model_file ?? result.package_dir}</span>
+              {result.sha256 ? <span className="mono">sha256: {result.sha256.slice(0, 16)}…</span> : null}
+            </div>
+            <div className="issue-list">
+              {result.issues.map((issue) => (
+                <div className="issue" key={`${issue.code}-${issue.path}`}>
+                  <strong>{zhIssue(issue.code)}</strong>
+                  <span>{zhIssueDetail(issue)}</span>
+                </div>
+              ))}
+              {!result.issues.length ? <div className="empty-row">全部检查通过</div> : null}
+            </div>
+          </>
+        ) : (
+          <div className="empty-row">暂无结果</div>
+        )}
       </section>
 
       <section className="panel">

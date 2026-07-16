@@ -17,12 +17,12 @@ python scripts/serve_api.py --host 127.0.0.1 --port 8080 --metadata-db artifacts
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE="1"
 vmlab storage migrate
-.\.venv\Scripts\python.exe -m pytest
-python scripts/acceptance_check.py
+python -m pytest
+python scripts/acceptance_check.py --skip-pytest
 cd frontend
 npm ci
 npm run build
-npm audit --omit dev
+npm audit --omit=dev --audit-level=high
 ```
 
 服务启动后：

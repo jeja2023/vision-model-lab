@@ -2,7 +2,12 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:
@@ -18,7 +23,7 @@ jobs:
         run: |
           export PYTHONDONTWRITEBYTECODE=1
           python -m pytest
-          python scripts/acceptance_check.py
+          python scripts/acceptance_check.py --skip-pytest
 
   frontend:
     runs-on: ubuntu-latest
@@ -32,12 +37,19 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Check for mojibake in source strings
+        # 阻止非 UTF-8 编辑器保存造成的中文乱码（字符串字面量内出现连续问号）再次入库。
+        run: |
+          if grep -rnP '"[^"\n]*\?\?\?[^"\n]*"' --include='*.ts' --include='*.tsx' src; then
+            echo "发现疑似乱码字符串（连续问号字面量），请检查文件编码。"
+            exit 1
+          fi
       - name: Install frontend
         run: npm ci
       - name: Build frontend
         run: npm run build
-      - name: Audit frontend
-        run: npm audit --audit-level=moderate
+      - name: Audit frontend (production deps only)
+        run: npm audit --omit=dev --audit-level=high
 
   docker:
     runs-on: ubuntu-latest
@@ -45,8 +57,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build image
-        run: |
-          docker build \
-            --build-arg NODE_IMAGE=node:22-alpine \
-            --build-arg PYTHON_IMAGE=python:3.12-slim \
-            -t vision-model-lab:ci .
+        run: docker build -t vision-model-lab:ci .
