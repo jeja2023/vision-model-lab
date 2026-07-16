@@ -232,3 +232,35 @@ def test_prepare_sql_handles_prefix_parameter_names_and_literal_question_marks()
 
     non_returning = adapter._prepare_sql("INSERT INTO unknown_table (a) VALUES (?)", ("x",))
     assert "RETURNING" not in non_returning
+
+
+def test_storage_migrate_stamps_legacy_database_created_by_builtin_ddl(workspace_tmp_path: Path) -> None:
+    """回归：旧版内置 DDL 创建的存量库（无 Alembic 戳记）migrate 不得报 table already exists。"""
+    repo_root = Path(__file__).resolve().parents[1]
+    database = workspace_tmp_path / "legacy.sqlite3"
+    # 先用运行时内置 DDL 建库（模拟 0.4.x 存量库，无 alembic_version）。
+    MetadataStore(database)
+
+    env = {**os.environ, "VMLAB_WORKSPACE": str(repo_root)}
+    result = subprocess.run(
+        [sys.executable, "-m", "vision_model_lab.cli", "storage", "migrate", "--uri", str(database)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "stamped existing schema" in result.stdout
+    # 幂等：再跑一次走正常 upgrade 路径。
+    second = subprocess.run(
+        [sys.executable, "-m", "vision_model_lab.cli", "storage", "migrate", "--uri", str(database)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert '"migrated_via": "alembic"' in second.stdout

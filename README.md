@@ -17,19 +17,19 @@
 
 ## 一键启动
 
-Windows 本地开发可直接双击根目录的 `start.bat`。跨平台或命令行启动使用 Python 脚本：
+任意平台在项目根目录执行：
 
 ```powershell
-python scripts/start_lab.py
+python start.py
 ```
 
-脚本会读取 `.env`，创建或复用 `.venv`，安装 Python 依赖，安装并构建前端，初始化元数据存储，然后启动 API 和管理台。`start.bat` 仅负责调用这个 Python 脚本，根目录不再保留其他启动入口。
+脚本会读取 `.env`（首次启动自动从 `.env.example` 复制），创建或复用 `.venv`，安装 Python 依赖，安装并构建前端，初始化元数据存储，然后启动 API 和管理台。`start.py` 仅负责校验 Python 版本并调用 `scripts/start_lab.py`，根目录不再保留其他启动入口。
 
 常用参数：
 
 ```powershell
-python scripts/start_lab.py --port 8080
-python scripts/start_lab.py --skip-install --skip-frontend-build
+python start.py --port 8080
+python start.py --skip-install --skip-frontend-build
 ```
 
 启动后访问：

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -122,6 +123,41 @@ def _cmd_validate_contract(args: argparse.Namespace) -> int:
     return 0 if result.ok else 2
 
 
+def _sqlite_path_from_uri(uri: str) -> Path | None:
+    """返回 SQLite 文件路径；PG DSN 或 :memory: 返回 None。"""
+    if uri == ":memory:" or "://" in uri:
+        return None
+    path = Path(uri)
+    if not path.is_absolute():
+        workspace = Path(os.environ.get("VMLAB_WORKSPACE", Path.cwd())).resolve()
+        path = workspace / path
+    return path
+
+
+def _needs_alembic_stamp(uri: str) -> bool:
+    """存量库检测：基础表已由旧版内置 DDL 建好、但 Alembic 版本戳缺失或为空。
+
+    这种库直接 upgrade 会因 'table already exists' 失败，需要先 stamp head。
+    （失败的 upgrade 可能留下空的 alembic_version 表，同样按缺戳处理。）
+    """
+    db_path = _sqlite_path_from_uri(uri)
+    if db_path is None or not db_path.exists() or db_path.stat().st_size == 0:
+        return False
+    import sqlite3
+
+    try:
+        with sqlite3.connect(db_path) as connection:
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "experiments" not in tables:
+                return False
+            if "alembic_version" not in tables:
+                return True
+            stamped = connection.execute("SELECT COUNT(*) FROM alembic_version").fetchone()[0]
+            return int(stamped) == 0
+    except sqlite3.Error:
+        return False
+
+
 def _cmd_storage_migrate(args: argparse.Namespace) -> int:
     settings = load_settings()
     uri = args.uri or settings.metadata_db
@@ -135,13 +171,16 @@ def _cmd_storage_migrate(args: argparse.Namespace) -> int:
             root = Path(__file__).resolve().parents[2]
             ini_path = root / "alembic.ini"
             if ini_path.exists():
-                import os as _os
-
-                _os.environ["VMLAB_METADATA_DB"] = uri
+                os.environ["VMLAB_METADATA_DB"] = uri
                 config = alembic.config.Config(str(ini_path))
                 config.set_main_option("script_location", str(root / "migrations"))
+                if _needs_alembic_stamp(uri):
+                    # 旧版内置 DDL 创建的存量库：schema 与基线一致，补记版本戳后再升级。
+                    alembic.command.stamp(config, "head")
+                    migrated_via = "alembic (stamped existing schema)"
+                else:
+                    migrated_via = "alembic"
                 alembic.command.upgrade(config, "head")
-                migrated_via = "alembic"
         except ImportError:
             pass
     store = metadata_store_from_uri(uri)
