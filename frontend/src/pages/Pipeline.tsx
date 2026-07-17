@@ -5,6 +5,7 @@ import {
   artifactDownloadUrl,
   cancelPipelineJob,
   createPackage,
+  downloadArtifact,
   errorMessage,
   getPipelineJob,
   listAdapters,
@@ -451,6 +452,10 @@ export function Pipeline({ runs, onRefresh }: PipelineProps) {
                       key={artifact.id}
                       href={artifactDownloadUrl(artifact.id)}
                       title={artifact.path ?? artifact.uri ?? artifact.name}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        void downloadArtifact(artifact.id, artifact.name);
+                      }}
                       download
                     >
                       <span>{artifact.kind}</span>

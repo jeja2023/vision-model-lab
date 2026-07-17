@@ -211,6 +211,33 @@ class MetadataStore:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'admin',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                expires_at TEXT NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status ON pipeline_jobs(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_job_logs_job_id ON pipeline_job_logs(job_id)")
@@ -845,6 +872,69 @@ class MetadataStore:
             ).fetchall()
         return [self._deployment_rollout_row(row) for row in rows]
 
+    def count_users(self) -> int:
+        with self.connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+        return int(row["count"])
+
+    def create_user(self, username: str, password_salt: str, password_hash: str, *, role: str = "admin") -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO users (username, password_salt, password_hash, role) VALUES (?, ?, ?, ?)",
+                (username, password_salt, password_hash, role),
+            )
+        return self.get_user_by_username(username)
+
+    def get_user_by_username(self, username: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if row is None:
+            raise KeyError(username)
+        return self._user_row(row)
+
+    def update_user_password(self, username: str, password_salt: str, password_hash: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE users SET password_salt = ?, password_hash = ?, updated_at = ? WHERE username = ?",
+                (password_salt, password_hash, utc_now_iso(), username),
+            )
+        # 密码变更后撤销该用户全部会话，避免旧令牌继续有效。
+        user = self.get_user_by_username(username)
+        with self.connect() as connection:
+            connection.execute("UPDATE auth_sessions SET revoked = 1 WHERE user_id = ?", (user["id"],))
+        return user
+
+    def create_auth_session(self, token_hash: str, user_id: int, username: str, expires_at: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO auth_sessions (token_hash, user_id, username, expires_at) VALUES (?, ?, ?, ?)",
+                (token_hash, user_id, username, expires_at),
+            )
+            row = connection.execute("SELECT * FROM auth_sessions WHERE token_hash = ?", (token_hash,)).fetchone()
+        return self._auth_session_row(row)
+
+    def get_auth_session(self, token_hash: str) -> dict[str, Any] | None:
+        """返回未撤销且未过期的会话；无效则返回 None。"""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM auth_sessions WHERE token_hash = ? AND revoked = 0 AND expires_at > ?",
+                (token_hash, utc_now_iso()),
+            ).fetchone()
+        return self._auth_session_row(row) if row is not None else None
+
+    def revoke_auth_session(self, token_hash: str) -> None:
+        with self.connect() as connection:
+            connection.execute("UPDATE auth_sessions SET revoked = 1 WHERE token_hash = ?", (token_hash,))
+
+    def purge_expired_auth_sessions(self) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM auth_sessions WHERE revoked = 1 OR expires_at <= ?",
+                (utc_now_iso(),),
+            )
+            deleted = getattr(cursor, "rowcount", 0) or 0
+        return int(deleted)
+
     def get_audit_event(self, event_id: int) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM audit_events WHERE id = ?", (event_id,)).fetchone()
@@ -925,6 +1015,16 @@ class MetadataStore:
     def _deployment_rollout_row(row: sqlite3.Row) -> dict[str, Any]:
         return dict(row)
 
+    @staticmethod
+    def _user_row(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    @staticmethod
+    def _auth_session_row(row: sqlite3.Row) -> dict[str, Any]:
+        record = dict(row)
+        record["revoked"] = bool(record["revoked"])
+        return record
+
 
 class _PostgresCursorAdapter:
     def __init__(self, cursor: Any) -> None:
@@ -959,6 +1059,8 @@ class _PostgresConnectionAdapter:
         "pipeline_artifacts",
         "release_approvals",
         "deployment_rollouts",
+        "users",
+        "auth_sessions",
     }
 
     def __init__(self, connection: Any) -> None:
@@ -1193,8 +1295,31 @@ class PostgresMetadataStore(MetadataStore):
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGSERIAL PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'admin',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id BIGSERIAL PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id BIGINT NOT NULL,
+                username TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMPTZ NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0
+            )
+            """,
         ):
             connection.execute(table_sql)
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status ON pipeline_jobs(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_job_logs_job_id ON pipeline_job_logs(job_id)")

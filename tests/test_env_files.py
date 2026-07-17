@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 # 允许出现在 .env 中的非机密占位值。
-SECRET_PATTERN = re.compile(r"^(VMLAB_AUTH_TOKEN|VMLAB_S3_ACCESS_KEY_ID|VMLAB_S3_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)\s*=\s*(.+)$")
+SECRET_PATTERN = re.compile(r"^(VMLAB_AUTH_TOKEN|VMLAB_ADMIN_PASSWORD|VMLAB_S3_ACCESS_KEY_ID|VMLAB_S3_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)\s*=\s*(.+)$")
 PLACEHOLDER_VALUES = {"", "change-me", "your-token", "your-access-key", "your-secret-key", "<token>", "<access-key>", "<secret-key>"}
 
 

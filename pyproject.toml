@@ -41,6 +41,9 @@ vmlab = "vision_model_lab.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pyright]
+extraPaths = ["src", "scripts"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

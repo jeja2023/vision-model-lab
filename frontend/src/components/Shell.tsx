@@ -5,8 +5,10 @@ import {
   FileCheck2,
   FlaskConical,
   LayoutDashboard,
+  LogOut,
   PlaySquare,
-  RefreshCw
+  RefreshCw,
+  UserRound
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -25,10 +27,12 @@ type ShellProps = {
   onViewChange: (view: ViewKey) => void;
   onRefresh: () => void;
   apiStatus: string;
+  username: string;
+  onLogout: () => void;
   children: ReactNode;
 };
 
-export function Shell({ activeView, onViewChange, onRefresh, apiStatus, children }: ShellProps) {
+export function Shell({ activeView, onViewChange, onRefresh, apiStatus, username, onLogout, children }: ShellProps) {
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -59,9 +63,18 @@ export function Shell({ activeView, onViewChange, onRefresh, apiStatus, children
             <Activity size={18} />
             <span>{apiStatus}</span>
           </div>
-          <button className="icon-button" onClick={onRefresh} title="刷新">
-            <RefreshCw size={18} />
-          </button>
+          <div className="topbar-actions">
+            <span className="current-user" title="当前用户">
+              <UserRound size={16} />
+              {username}
+            </span>
+            <button className="icon-button" onClick={onRefresh} title="刷新">
+              <RefreshCw size={18} />
+            </button>
+            <button className="icon-button" onClick={onLogout} title="退出登录">
+              <LogOut size={18} />
+            </button>
+          </div>
         </header>
         <section className="content">{children}</section>
       </main>

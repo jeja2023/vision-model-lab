@@ -65,9 +65,23 @@ def venv_python(root: Path) -> Path:
     return root / ".venv" / "bin" / "python"
 
 
-def run(command: list[str | Path], *, cwd: Path) -> None:
+def run(command: list[str | Path], *, cwd: Path, quiet: bool = False) -> None:
     printable = " ".join(str(part) for part in command)
     print(f"[执行] {printable}", flush=True)
+    if quiet:
+        # 静默模式：不实时输出子进程日志，仅在失败时完整打印以便排查。
+        result = subprocess.run(
+            [str(part) for part in command],
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+        )
+        if result.returncode != 0:
+            print(result.stdout, flush=True)
+            raise subprocess.CalledProcessError(result.returncode, result.args)
+        return
     subprocess.run([str(part) for part in command], cwd=str(cwd), check=True)
 
 
@@ -105,8 +119,8 @@ def ensure_frontend(root: Path, skip_build: bool) -> None:
         return
 
     if not (frontend / "node_modules").exists():
-        print("[准备] 正在安装前端依赖...", flush=True)
-        run(command_for_executable(npm, "ci"), cwd=frontend)
+        print("[准备] 正在安装前端依赖（详细日志已隐藏，失败时才显示）...", flush=True)
+        run(command_for_executable(npm, "ci"), cwd=frontend, quiet=True)
 
     print("[准备] 正在构建前端...", flush=True)
     run(command_for_executable(npm, "run", "build"), cwd=frontend)
@@ -157,8 +171,8 @@ def main(argv: list[str] | None = None) -> int:
     python_path = ensure_virtualenv(root)
 
     if not args.skip_install:
-        print("[准备] 正在安装 Python 依赖...", flush=True)
-        run([python_path, "-m", "pip", "install", "-e", ".[dev]"], cwd=root)
+        print("[准备] 正在安装 Python 依赖（详细日志已隐藏，失败时才显示）...", flush=True)
+        run([python_path, "-m", "pip", "install", "-q", "-e", ".[dev]"], cwd=root, quiet=True)
 
     ensure_frontend(root, args.skip_frontend_build)
 

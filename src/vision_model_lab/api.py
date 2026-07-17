@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+import hmac
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from vision_model_lab import __version__
 from vision_model_lab.adapters.registry import list_adapters
+from vision_model_lab.auth import generate_session_token, hash_password, token_digest, verify_password
 from vision_model_lab.contracts import validate_models_fragment, validate_release_decision
 from vision_model_lab.datasets.manifest import validate_manifest
 from vision_model_lab.object_store import object_store_from_settings
@@ -34,6 +37,36 @@ EXECUTOR = ThreadPoolExecutor(max_workers=SETTINGS.pipeline_workers, thread_name
 
 # 同步执行超长流水线会阻塞 HTTP worker；超过该时长的配置应使用 async 模式。
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+
+
+# 默认管理员账户：首次启动（users 表为空）时自动创建。
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin123"
+
+# 无需登录即可访问的 API 路径（登录本身与健康检查）。
+PUBLIC_API_PATHS = {"/api/auth/login"}
+
+
+def _bootstrap_admin_user() -> None:
+    """users 表为空时创建默认管理员，保证系统首次启动即可登录。"""
+    try:
+        if STORE.count_users() > 0:
+            return
+        password = SETTINGS.admin_password or DEFAULT_ADMIN_PASSWORD
+        salt, digest = hash_password(password)
+        STORE.create_user(DEFAULT_ADMIN_USERNAME, salt, digest, role="admin")
+        STORE.record_audit_event(actor="system", action="user.bootstrap", target=DEFAULT_ADMIN_USERNAME, detail={})
+        if SETTINGS.admin_password:
+            logger.info("created admin user %r with VMLAB_ADMIN_PASSWORD", DEFAULT_ADMIN_USERNAME)
+        else:
+            logger.warning(
+                "created admin user %r with default password %r; "
+                "set VMLAB_ADMIN_PASSWORD or run `vmlab user set-password` to change it",
+                DEFAULT_ADMIN_USERNAME,
+                DEFAULT_ADMIN_PASSWORD,
+            )
+    except Exception:  # noqa: BLE001 - 引导失败不应阻止服务可用（例如只读 DB）
+        logger.exception("admin user bootstrap failed")
 
 
 def _recover_jobs_on_startup() -> None:
@@ -63,6 +96,11 @@ def _recover_jobs_on_startup() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    _bootstrap_admin_user()
+    try:
+        STORE.purge_expired_auth_sessions()
+    except Exception:  # noqa: BLE001 - 清理失败不影响启动
+        logger.exception("expired auth session purge failed")
     _recover_jobs_on_startup()
     yield
     EXECUTOR.shutdown(wait=False, cancel_futures=True)
@@ -73,14 +111,6 @@ app = FastAPI(
     version=__version__,
     description="Management API for vision model research artifacts, dataset manifests, experiments, and delivery packages.",
     lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=SETTINGS.cors_origins,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
 )
 
 if SETTINGS.serve_frontend and SETTINGS.frontend_dist.exists():
@@ -210,12 +240,55 @@ class DeploymentRolloutRequest(ApiModel):
     rollback_target: str | None = None
 
 
-def require_auth(authorization: str | None = Header(default=None)) -> None:
-    if not SETTINGS.auth_token:
-        return
-    expected = f"Bearer {SETTINGS.auth_token}"
-    if authorization != expected:
+def _resolve_bearer_identity(authorization: str | None) -> dict[str, Any] | None:
+    """解析 Authorization 头：静态令牌或有效会话令牌均可，无效返回 None。"""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization[len("Bearer "):].strip()
+    if not token:
+        return None
+    if SETTINGS.auth_token and hmac.compare_digest(token, SETTINGS.auth_token):
+        return {"username": "api-token", "role": "service", "session": None}
+    session = STORE.get_auth_session(token_digest(token))
+    if session is not None:
+        return {"username": session["username"], "role": "user", "session": session}
+    return None
+
+
+class LoginRequest(ApiModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=512)
+
+
+def require_auth(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    identity = _resolve_bearer_identity(authorization)
+    if identity is None:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    return identity
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next: Callable[[Request], Awaitable[Any]]) -> Any:
+    """全局认证：除登录接口外，全部 /api 路径都要求有效令牌。
+
+    /health 与前端静态资源保持公开（容器健康检查、登录页本身依赖它们）。
+    """
+    path = request.url.path
+    if path.startswith("/api") and path not in PUBLIC_API_PATHS and request.method != "OPTIONS":
+        if _resolve_bearer_identity(request.headers.get("Authorization")) is None:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
+
+
+# CORS 必须在认证中间件之后注册（add_middleware 置于栈外层），
+# 保证 401 响应也带 CORS 头、预检请求不被认证拦截。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=SETTINGS.cors_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _pipeline_payload(config_path: Path, output_root: Path, request: PipelineRunRequest) -> dict[str, Any]:
@@ -341,9 +414,45 @@ def health() -> dict[str, Any]:
         "serve_frontend": SETTINGS.serve_frontend and SETTINGS.frontend_dist.exists(),
         "storage_backend": SETTINGS.storage_backend,
         "storage_uri": SETTINGS.storage_uri,
-        "auth_required": bool(SETTINGS.auth_token),
+        "auth_required": True,
         "pipeline_workers": SETTINGS.pipeline_workers,
         "external_shell_commands_allowed": SETTINGS.allow_shell_commands,
+    }
+
+
+@app.post("/api/auth/login")
+def login(request: LoginRequest) -> dict[str, Any]:
+    try:
+        user = STORE.get_user_by_username(request.username)
+    except KeyError:
+        user = None
+    if user is None or not verify_password(request.password, user["password_salt"], user["password_hash"]):
+        # 用户不存在与密码错误返回同一提示，避免用户名枚举。
+        STORE.record_audit_event(actor=request.username, action="auth.login.failed", target=request.username, detail={})
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    token = generate_session_token()
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=SETTINGS.session_ttl_hours)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    STORE.create_auth_session(token_digest(token), int(user["id"]), user["username"], expires_at)
+    STORE.record_audit_event(actor=user["username"], action="auth.login", target=user["username"], detail={})
+    return {"token": token, "username": user["username"], "role": user["role"], "expires_at": expires_at}
+
+
+@app.post("/api/auth/logout")
+def logout(identity: dict[str, Any] = Depends(require_auth), authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    if identity.get("session") is not None and authorization:
+        token = authorization[len("Bearer "):].strip()
+        STORE.revoke_auth_session(token_digest(token))
+        STORE.record_audit_event(actor=identity["username"], action="auth.logout", target=identity["username"], detail={})
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def me(identity: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    session = identity.get("session")
+    return {
+        "username": identity["username"],
+        "role": identity["role"],
+        "expires_at": session["expires_at"] if session else None,
     }
 
 

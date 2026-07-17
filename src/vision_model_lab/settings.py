@@ -44,6 +44,8 @@ class Settings:
     storage_backend: str
     storage_uri: str
     auth_token: str | None
+    admin_password: str | None
+    session_ttl_hours: int
     pipeline_workers: int
     external_command_timeout_seconds: int
     external_command_log_max_chars: int
@@ -68,6 +70,8 @@ def load_settings() -> Settings:
         storage_backend=os.environ.get("VMLAB_STORAGE_BACKEND", "local"),
         storage_uri=os.environ.get("VMLAB_STORAGE_URI", str(workspace_root / "artifacts" / "object-store")),
         auth_token=os.environ.get("VMLAB_AUTH_TOKEN"),
+        admin_password=os.environ.get("VMLAB_ADMIN_PASSWORD"),
+        session_ttl_hours=_int_env("VMLAB_SESSION_TTL_HOURS", 24),
         pipeline_workers=_int_env("VMLAB_PIPELINE_WORKERS", 2),
         external_command_timeout_seconds=_int_env("VMLAB_EXTERNAL_COMMAND_TIMEOUT_SECONDS", 3600),
         external_command_log_max_chars=_int_env("VMLAB_EXTERNAL_COMMAND_LOG_MAX_CHARS", 20000),

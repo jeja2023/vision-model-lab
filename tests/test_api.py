@@ -24,7 +24,16 @@ def isolated_api_store() -> Iterator[None]:
 
 
 def _client() -> TestClient:
-    return TestClient(api.app)
+    """已登录的测试客户端：全部 /api 接口现在都要求认证。"""
+    client = TestClient(api.app)
+    # 测试不经过 lifespan（无 with 块），显式引导默认 admin 账户。
+    api._bootstrap_admin_user()
+    token = client.post(
+        "/api/auth/login",
+        json={"username": api.DEFAULT_ADMIN_USERNAME, "password": api.DEFAULT_ADMIN_PASSWORD},
+    ).json()["token"]
+    client.headers.update({"Authorization": f"Bearer {token}"})
+    return client
 
 
 def test_health_endpoint() -> None:

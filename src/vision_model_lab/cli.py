@@ -196,6 +196,32 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_user_set_password(args: argparse.Namespace) -> int:
+    from vision_model_lab.auth import hash_password
+
+    settings = load_settings()
+    store = metadata_store_from_uri(args.uri or settings.metadata_db)
+    salt, digest = hash_password(args.password)
+    try:
+        store.get_user_by_username(args.username)
+        store.update_user_password(args.username, salt, digest)
+        created = False
+    except KeyError:
+        if not args.create:
+            print(f"用户 {args.username!r} 不存在；使用 --create 创建。", flush=True)
+            return 1
+        store.create_user(args.username, salt, digest, role=args.role)
+        created = True
+    store.record_audit_event(
+        actor="cli",
+        action="user.create" if created else "user.set-password",
+        target=args.username,
+        detail={},
+    )
+    _print_json({"ok": True, "username": args.username, "created": created})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vmlab", description="Vision model lab delivery tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -257,6 +283,16 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8080)
     serve_parser.add_argument("--reload", action="store_true")
     serve_parser.set_defaults(func=_cmd_serve)
+
+    user_parser = subparsers.add_parser("user", help="Console user management")
+    user_subparsers = user_parser.add_subparsers(dest="user_command", required=True)
+    set_password_parser = user_subparsers.add_parser("set-password", help="Set (or create with --create) a console user password")
+    set_password_parser.add_argument("--username", required=True)
+    set_password_parser.add_argument("--password", required=True)
+    set_password_parser.add_argument("--create", action="store_true", help="Create the user if it does not exist")
+    set_password_parser.add_argument("--role", default="admin")
+    set_password_parser.add_argument("--uri", help="Override VMLAB_METADATA_DB")
+    set_password_parser.set_defaults(func=_cmd_user_set_password)
 
     return parser
 
